@@ -1,6 +1,7 @@
 # 游戏登陆流程
 
 game是游戏名称，隐藏一下信息
+gamehost是官网名
 
 ### 概览
 
@@ -27,9 +28,9 @@ UpdateController是我们游戏热更的关键，不能随便修改里面的代�
 继续看UpdateController的功能，下面介绍的都是ios或者android的情况，也就是走`checkUpdate()`的玩家
 
 1. 第一步从PlayerPrefs里面拿到__version__这个字段，这里提一下，自己游戏内持久化数据的时候（比如做一些前端红点），尽量用xyd.db.misc而不是PlayerPrefs，并且定义字段名字一定要有区分度
-2. 第二步checkResVersion函数，这里向后端发送**0x0003**，这里是向后端拿version信息，如果多次拿不到，会报**e:001**这个报错，方便定位问题。如果报e001，则大概率是连不上后端服务器（gameback），检查线上的这个问题，浏览器访问一下http://gameback.carolgames.com/api/v1 看看是不是连不上我们游戏的后端api/v1
-3. checkResVersion从后端拿到版本信息，这里的版本信息包含了当前版本（serverversion），最小热更版本（minHotVersion），最小包版本（minPkgVersion），还有后端服务器的地址和端口（ios审核服是另一个，正常玩家还是连的上面的gameback.carolgames.com）。然后会根据系统和从后端拿到的版本信息，以及CDN服务器的地址，拿到一个version.json文件的地址。
-4. 从前端PlayerPrefs里拿到当前版本信息，如果这里判断版本已经等于serverVersion，则进入游戏（直接看6）；如果小于minPkgVersion，则玩家需要更新底包，会引导玩家去商店更包；如果不等于serverVersion但大于minHotVersion，就把version信息塞进backupdateController里面，启动游戏让他偷偷玩，后端继续热更；如果小于minHotVersion，就会用刚才拿CDN和版本信息拼到的URL，下载一下version.json文件（如果下不下来，那就会打印**e:002**，这里如果报了，访问一下http://gameres.carolgames.com 看看能不能连上我们游戏的后端，这个和后面的**e:003**是一个排查方法，先问下是不是前端version文件没传，如果有个设备频繁报**e:002**或者**e:003**这种，是自己人就把它设备拿过来看看或者让他自己ping一下，如果是比较多玩家这样报。可以用一下前端的`xyd.SDKManager`的`GetPingRes`接口辅助ping一下后端，发一下日志。
+2. 第二步checkResVersion函数，这里向后端发送**0x0003**，这里是向后端拿version信息，如果多次拿不到，会报**e:001**这个报错，方便定位问题。如果报e001，则大概率是连不上后端服务器（gameback），检查线上的这个问题，浏览器访问一下http://gameback.gamehost.com/api/v1 看看是不是连不上我们游戏的后端api/v1
+3. checkResVersion从后端拿到版本信息，这里的版本信息包含了当前版本（serverversion），最小热更版本（minHotVersion），最小包版本（minPkgVersion），还有后端服务器的地址和端口（ios审核服是另一个，正常玩家还是连的上面的gameback.gamehost.com）。然后会根据系统和从后端拿到的版本信息，以及CDN服务器的地址，拿到一个version.json文件的地址。
+4. 从前端PlayerPrefs里拿到当前版本信息，如果这里判断版本已经等于serverVersion，则进入游戏（直接看6）；如果小于minPkgVersion，则玩家需要更新底包，会引导玩家去商店更包；如果不等于serverVersion但大于minHotVersion，就把version信息塞进backupdateController里面，启动游戏让他偷偷玩，后端继续热更；如果小于minHotVersion，就会用刚才拿CDN和版本信息拼到的URL，下载一下version.json文件（如果下不下来，那就会打印**e:002**，这里如果报了，访问一下http://gameres.gamehost.com 看看能不能连上我们游戏的后端，这个和后面的**e:003**是一个排查方法，先问下是不是前端version文件没传，如果有个设备频繁报**e:002**或者**e:003**这种，是自己人就把它设备拿过来看看或者让他自己ping一下，如果是比较多玩家这样报。可以用一下前端的`xyd.SDKManager`的`GetPingRes`接口辅助ping一下后端，发一下日志。
 5. version.json准备好之后，updateRes会把每条versionInfo（里面有version，md5等信息）对应的文件下下来，多次下不下来某一条会报**e:003**。全都下载完之后，标记更新状态为结束，并重启游戏
 6. 重启游戏后，这次更新就完成了，ResManager会调用preloadAbAsync，前端加载GUIScene，lua加载Game模块
 
@@ -59,9 +60,9 @@ Game模块主要就是做三件事
 
 错误码 | 原因 | 排查
 --- | --- | ---
-e:001| 连不上游戏后端api/v1|浏览器访问http://gameback.carolgames.com/api/v1
-e:002|下不到version文件|大概率是前端打完包没传version.json文件，先问下前端打包有没有问题，没问题再ping gameres.carolgames.com
-e:003|某条versionInfo对应的资源下不到| ping gameres.carolgames.com ，检查一下网络问题
+e:001| 连不上游戏后端api/v1|浏览器访问http://gameback.gamehost.com/api/v1
+e:002|下不到version文件|大概率是前端打完包没传version.json文件，先问下前端打包有没有问题，没问题再ping gameres.gamehost.com
+e:003|某条versionInfo对应的资源下不到| ping gameres.gamehost.com ，检查一下网络问题
 e:004|玩家封号了，但没有封号信息|联系运营排查封号的时候是不是没选理由
 e:005|0x0001HTTP请求失败|看下是不是后端是不是因为平台token校验不过报很多LOGIN FAILED，问下平台同事原因
 e:006|连gate超时|根据报错打的gate host+port，看看是哪个gate进行排查
