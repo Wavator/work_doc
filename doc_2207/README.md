@@ -13,3 +13,6 @@
 redis，openresty
 考虑下个月新开一个note.md当作学习记录
 
+### 项目总结：
+login.md 游戏登陆流程
+
