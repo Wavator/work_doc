@@ -8,6 +8,7 @@
 
 - [某个redis连接数过高](main.md)
 - [worker CPU 100%的问题](main.md)
+- [resty.http较低版本踩坑](main.md)
 
 ### 持续学习的部分：
 redis，openresty
