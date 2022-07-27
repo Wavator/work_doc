@@ -15,3 +15,53 @@
     
 - 解决方法：
     新开一个端口用于上锁，同时请求结束的时候lock的redis统一keepalive，连接数过高的情况解决
+
+
+#### nginx workerCPU跑满的处理
+
+测试先从简，跑这个command脚本
+```lua
+game@projectG-0-199:~/release/lua-server$ cat command/test.lua
+local ngx = ngx
+local t = 1
+
+local time = ngx.time()
+while true do
+    t = t * 2
+    ngx.update_time()
+    if ngx.time() - time > 100 then
+        break
+    end
+end
+print(t)
+```
+
+考虑借助一些工具来排查
+
+- https://blog.csdn.net/weixin_33862041/article/details/93972380 这个博客是一个排查CPU跑满的实践，主要流程是gdb打到worker上，bt把堆栈打印一下，找到luajit在哪个地址，反编译一下，偏移量做差，找到具体的lua代码。意思是这么个意思，细看我也没细看，感觉太麻烦了，继续找别的工具
+- https://blog.openresty.com.cn/cn/bilibili-xray-incident/ openresty xray，帮b站排查到了lua代码死循环，但是是商用的，放弃
+- openresty开源的sample工具 https://github.com/openresty/openresty-systemtap-toolkit 看上去可以，先从里面找个看上去对劲的 `ngx-sample-lua-bt`  
+  ```shell
+    game@projectG-0-199:~/openresty_tools/openresty-systemtap-toolkit$ sudo ./ngx-sample-lua-bt -p 13679 --luajit20 -t 20 > tmp.bt
+    WARNING: Tracing 13679 (/usr/local/openresty/nginx/sbin/nginx)  for LuaJIT 2.0...
+    WARNING: Time's up. Quitting now...
+    game@projectG-0-199:~/openresty_tools/openresty-systemtap-toolkit$ vim tmp.bt
+   ```
+   发现里面什么都没，查了一下应该是个bug，说明这个不能用,后面review这个工具集的时候发现readme里强调了这个指令有很多bug，不太建议用
+- 换这个工具的其他指令，`ngx-lua-bt` 他定位到了lua代码，command第七行（每次sample其实都是不同行数，死循环6-9行都是，定位到某一行肯定就算解决了问题。
+```shell
+game@projectG-0-199:~/openresty_tools/openresty-systemtap-toolkit$ sudo ./ngx-lua-bt -p 14877 --luajit20
+WARNING: Probe 'process' has been elided: keyword at <input>:369:1
+ source: probe
+         ^
+WARNING: Tracing 14877 (/usr/local/openresty/nginx/sbin/nginx) for LuaJIT 2.0...
+C:ngx_http_lua_ngx_update_time
+@./command/test.lua:7
+=init_worker_by_lua:45
+C:lj_ffh_pcall
+=init_worker_by_lua:52    
+```
+- 再试验一下openresty其他repo里面的工具，https://github.com/openresty/openresty-gdb-utils，这个一样可用
+![988b3bfb6d3c5229bc483ac14286fba7afdf2f5a](assets/988b3bfb6d3c5229bc483ac14286fba7afdf2f5a.png)
+
+这个问题到这里就解决了
