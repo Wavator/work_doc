@@ -6,13 +6,10 @@
 
 ### 有价值的问题排查：
 
-- 某个redis连接数过高
-- worker CPU 100%的问题
-
+- [某个redis连接数过高](main.md)
+- [worker CPU 100%的问题](main.md)
+- 
 ### 持续学习的部分：
 redis，openresty
 考虑下个月新开一个note.md当作学习记录
-
-### 项目总结：
-login.md 游戏登陆流程
 

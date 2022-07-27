@@ -1,6 +1,15 @@
 ## 后端记录
+[排查redis连接数过高](#p1)
+[排查CPU 100%进程](#p2)
+- [CPU100%排查,ngx-lua-bt](#way1)
+- [CPU100%排查,openresty-gdb-utils](#way2)
 
-#### 查看某个redis连接数过高
+p1
+====
+
+
+#### 排查redis连接数过高
+ 
 
 - 问题起因： 查询某个问题的时候在lua-server查看netstat，发现连接redis某个公用端口：6380的连接中CLOSE_WAIT过高![](assets/16589158799398.jpg)
 
@@ -16,8 +25,11 @@
 - 解决方法：
     新开一个端口用于上锁，同时请求结束的时候lock的redis统一keepalive，连接数过高的情况解决
 
+p2
+====
 
 #### nginx workerCPU跑满的处理
+
 
 测试先从简，跑这个command脚本
 ```lua
@@ -48,6 +60,10 @@ print(t)
     game@projectG-0-199:~/openresty_tools/openresty-systemtap-toolkit$ vim tmp.bt
    ```
    发现里面什么都没，查了一下应该是个bug，说明这个不能用,后面review这个工具集的时候发现readme里强调了这个指令有很多bug，不太建议用
+
+way1
+====
+
 - 换这个工具的其他指令，`ngx-lua-bt` 他定位到了lua代码，command第七行（每次sample其实都是不同行数，死循环6-9行都是，定位到某一行肯定就算解决了问题。
 ```shell
 game@projectG-0-199:~/openresty_tools/openresty-systemtap-toolkit$ sudo ./ngx-lua-bt -p 14877 --luajit20
@@ -61,6 +77,9 @@ C:ngx_http_lua_ngx_update_time
 C:lj_ffh_pcall
 =init_worker_by_lua:52    
 ```
+way2
+====
+
 - 再试验一下openresty其他repo里面的工具，https://github.com/openresty/openresty-gdb-utils，这个一样可用
 ![988b3bfb6d3c5229bc483ac14286fba7afdf2f5a](assets/988b3bfb6d3c5229bc483ac14286fba7afdf2f5a.png)
 
