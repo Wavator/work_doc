@@ -81,7 +81,7 @@ C:lj_ffh_pcall
 way2
 ====
 
-- 再试验一下openresty其他repo里面的工具，https://github.com/openresty/openresty-gdb-utils，这个一样可用
+- 再试验一下openresty其他repo里面的工具，https://github.com/openresty/openresty-gdb-utils 这个一样可用
 ![988b3bfb6d3c5229bc483ac14286fba7afdf2f5a](assets/988b3bfb6d3c5229bc483ac14286fba7afdf2f5a.png)
 
 这个问题到这里就解决了
