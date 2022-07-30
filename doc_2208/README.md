@@ -1,0 +1,107 @@
+# 22年八月
+
+- [线上事故总结](#线上事故总结)
+    - [天赋模块](#天赋模块)
+
+
+线上事故总结
+====
+
+
+
+天赋模块
+====
+- 这个月上线了天赋系统，但是测试覆盖面在我看来不尽人意，一些战斗模式下战报100%报错，战力计算模块100%报错。后端无法避免第二个问题（只能说依赖的其他模块扔进ngx.timer异步处理且不报警）。第一个问题排查下来是sql防注入的问题。
+    在原本的后端代码中，战报存储有两种写法：
+    ```lua
+    local battle_report = self:get_report()
+    local ok, json_report = pcall(cjson.encode, battle_report)
+    if not ok then
+        ngx.ctx.error_msg = 'report encode err'
+        return false
+    end
+    
+    -- 第一种
+    local sql = [[
+        insert into report_db (report_id, player_id, report, time)
+        values
+        (%d, %d, %s, %d)
+    ]]
+    sql = string.format(sql, battle_report.report_id, self.player_id, ngx.quote_sql_str(json_report), ngx.time())
+    ngx.ctx.mysql:query(sql)
+    
+    -- 第二种
+    local sql = [[
+        insert into report_db (report_id, player_id, report, time)
+        values
+        (%d, %d, '%s', %d)
+    ]]
+    sql = string.format(sql, battle_report.report_id, self.player_id, json_report, ngx.time())
+    ```
+    
+    拿战报的时候(简单举一种例子)
+    ```lua
+    local sql = [[
+        select * from report_db where player_id = %d limit 10
+    ]]
+    sql = string.format(sql, self.player_id)
+    local res = ngx.ctx.mysql:query(sql)
+    if not res or not next(res) then
+        return {}
+    end
+    
+    local results = {}
+    for i = 1, #res do
+        local json_report = res[i].report
+        local report = cjson.decode(json_report)
+        table.insert(results, report)
+    end
+    return results
+    ```
+    
+    发现在第二种存法下，拿的时候decode有些情况会报错
+    原因是我们本来战斗有一个额外参数数组，数组里存了json str，就大概类似于
+    {arr: ["{"val":1}"]}
+    乍一看也挺对的，仔细一看啥都不对，cjson decode的时候会就近匹配一个引号，也就是"{"这一段，导致他认为这是个字符串，所以他觉得val的v应该是逗号或者右中括号（关闭json arr或者下一个str），这样就出问题了。这几个用了2的模式的代码在项目中稳定运行了比较久了，这个额外的json str是这周版本加进去的，报错了一时很难确认是存的有问题还是传的有问题（前端给后端一样传的json str），后面其他模式打了一下感觉战报没有问题，取的代码一样那只能是存的问题了，把第二种改成第一种，问题解决。
+    
+    解决了问题之后我复盘了一下，这个第二种情况，其实没有防止sql注入，只是不加引号不让往SQL里insert，因为分析器会报错，不加引号和上面report的类型对不上。所以第二种情况做法上就是不安全的. 不但不安全，'\'不经过正确转义还会被吃掉
+    写了一段测试代码
+    ```lua
+    local cjson = require 'cjson'
+    local val_str = cjson.encode({val = 1})
+
+    local arr = {
+        x = {
+            val_str
+        }
+    }
+    local report = cjson.encode(arr)
+
+    local sql = [[
+        insert into report_db (activity_id, stage_id, player_id, content, created_time)
+        values
+        (%d, %d, %d, '%s', %d)
+    ]]
+    sql = string.format(sql, 100, 1, 1000000001, report, ngx.time())
+    print(sql)
+
+    local ok, err =ngx.ctx.mysql:query(sql)
+    if not ok then
+        print(err)
+    end
+    print('before ' .. report)
+
+    sql = [[
+        select * from report_db where player_id = 1000000001 limit 1
+    ]]
+
+    local res, err = ngx.ctx.mysql:query(sql)
+    print('after ' .. res[1].content)
+    ```
+    运行结果
+    ```shell
+    before {"x":["{\"val\":1}"]}
+    after {"x":["{"val":1}"]}
+    ```
+    可以看到，这个str不被正确转义的话，json encode之后再被encode用来标记"的\会被干掉，原因是因为ngx的mysql认为'report'是被转过的，他存进去的时候会同时去掉''和第一层\，导致第一层的转义消失了，所以出现了上面的两个encode之后decode失败的问题。
+    
