@@ -37,6 +37,7 @@
         (%d, %d, '%s', %d)
     ]]
     sql = string.format(sql, battle_report.report_id, self.player_id, json_report, ngx.time())
+    ngx.ctx.mysql:quary(sql)
     ```
     
     拿战报的时候(简单举一种例子)
@@ -104,4 +105,16 @@
     after {"x":["{"val":1}"]}
     ```
     可以看到，这个str不被正确转义的话，json encode之后再被encode用来标记"的\会被干掉，原因是因为ngx的mysql认为'report'是被转过的，他存进去的时候会同时去掉''和第一层\，导致第一层的转义消失了，所以出现了上面的两个encode之后decode失败的问题。
+- ngx.null 的问题，天赋可以借给佣兵使用，佣兵有比较多的pipeline操作，也就是很多类似于
+    ```lua
+    rd:init_pipeline()
+    for _, partner_id in ipairs(partner_ids) do
+        local key = get_key(self.player_id, partner_id)
+        rd:hmget(key, ...)
+    end
+    local rd_res = rd:commit_pipeline()
+    ```
+    他这个有很多，其中一处我忘了判断 == ngx.null，塞到了redis里，然后拿的时候我加了== ngx.null，这个时候已经失效了，因为他塞进redis的时候就成了'userdata: NULL'，和ngx null并不相等，额外增加一层字符串的判断，问题解决
+    这个我觉得我的问题是改的不完全，漏改了一些地方。
+    原始代码为什么一个文件里拿partner info要在六个地方写hmget而不封装一层，我一时也无力吐槽。踩了雷肯定就是自己的问题，以后注意吧。
     
