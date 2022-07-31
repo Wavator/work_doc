@@ -114,7 +114,8 @@
     end
     local rd_res = rd:commit_pipeline()
     ```
-    他这个有很多，其中一处我忘了判断 == ngx.null，塞到了redis里，然后拿的时候我加了== ngx.null，这个时候已经失效了，因为他塞进redis的时候就成了'userdata: NULL'，和ngx null并不相等，额外增加一层字符串的判断，问题解决
+    他这个有很多，其中一处我忘了判断 == ngx.null，塞到了redis里，然后拿的时候我加了== ngx.null，这个时候已经失效了，因为他塞进redis的时候就成了'userdata: NULL'，和ngx.null并不相等，额外增加一层字符串的判断，问题解决
+    
     这个我觉得我的问题是改的不完全，漏改了一些地方。
     原始代码为什么一个文件里拿partner info要在六个地方写hmget而不封装一层，我一时也无力吐槽。踩了雷肯定就是自己的问题，以后注意吧。
     
