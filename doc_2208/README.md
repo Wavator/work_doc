@@ -3,6 +3,12 @@
 - [线上事故总结](#线上事故总结)
     - [天赋模块](#天赋模块)
 
+- [OpenResty](#OpenResty)
+    - [LuaJit](#luajit)
+        - [测试代码](#test)
+        - [table优化](#table)
+        - [string优化](#string)
+        - [os.*](#os)
 
 线上事故总结
 ====
@@ -144,4 +150,140 @@
     为了提升周末的生活质量，写的时候还是要谨慎小心。
 
 
+
+    OpenResty
+    ====
+
     
+    这周比较系统的学习了一下OpenResty（当然说掌握还差很多，但也收获不小），看看平时开发/测试的时候还是有一些坑，要进行规避
+    
+    luajit
+    ====
+    
+    LuaJit ~= Lua5.1，用的时候还是要仔细选择高性能接口。Jit的原理基础的都懂，高深的暂时没有研究的想法。
+    
+    另外看github有个开源工具[lj-releng](https://github.com/openresty/openresty-devel-utils/blob/master/lj-releng),可以扫Jit2.1语法，现在内网vim是Lua5.1语法，table.new是红色的，试试在内网给他进行一个装。
+    
+    test
+    ====
+    
+    OpenResty的Lua是LuaJit2.1，测试的时候有点不一样，根据其作者的建议，如果我们要测试一段代码(比如这个func)，那他应该要长这样：
+    ```lua
+    local function test(func, ...)
+        -- 让LuaJit觉得这段代码过热从而翻译成字节码
+        for i = 1, 10000 do
+            func(...)
+        end
+        ngx.update_time()
+        local t = ngx.now()
+        func(...)
+        ngx.update_time()
+        print(ngx.now() - t, 's')
+    end
+    local function test_a()
+    ....
+    end
+    test(test_a)
+    ```
+    下面第一个模块table的时候会比对一下不循环很多次的时候和循环很多次的时候的区别
+    
+    table
+    ====
+    
+    新操作还是不多的，concat之类的操作项目里会经常用。以前知道table.new，但一直用的比较少，这次来实际对比一下有什么区别
+    测试code大概是
+    ```lua
+    local sz = 1000000
+
+    local function test_a(real)
+        local a = table.new(sz, 0)
+        for i = 1, sz do
+            a[sz] = sz - i
+        end
+    end
+    -- 0.0049998760223389s
+    local function test_b(real)
+        local a = {}
+        for i = 1, sz do
+            a[i] = sz - i
+        end
+    end
+
+    -- 0.027999877929688s
+    ```
+    性能差距还是有点大的，sz去掉一个0（这个sz跑insert根本跑不完，O(t*n^2)，去掉一个0我都跑了特别久），测试一下`table.insert`，比第二个还慢几十倍，原因是每次取#是On的操作，虽然LuaJit官网说可以优化append类型的insert，但是还是很慢，估计#操作并不好优化，不然应该是慢2倍而不是几十倍了。
+    实际项目中，对于已知大小的table/hashtable，应当采用`table.new`，`table.insert`虽然代码可读性很高，但是还是减少使用，冷热代码均是如此，原因是因为对于没被Jit优化的代码他是真的O(n^2)，优化过之后也有几十倍的性能差距
+    
+    table.clear和table池估计实际用不到，不测了，等table new成为性能瓶颈可以回来看看
+    
+    
+    string
+    ====
+    
+    - 字符串拼接
+        比较基础，项目里我也用的比较多，`table.concat`优化，原理层面也比较简单，就是Lua的字符串理解成一个final类型的量，每次Jit会去string池检查有没有这个final的量，有就把新字符串指向他，没有就新建一个扔进去。Gc的时候没有引用的就删掉了，所以顺序拼接"a", "b", "c"m "d"内存里会有"a", "b", "c", "d", "ab", "abc", "abcd", concat可以把中间的省掉，会省很多内存（这里看上去小是因为string每个只有一个字母，长了就明显了。这个项目里str的基类拼接没用，我改了一下。
+    
+    - string.find,这个我看最新的[luajit NYI](http://wiki.luajit.org/NYI)里面,他说Only plain string searches (no patterns). 也就是你往里面扔一坨正则不行，不但不行，他的意思其实是要把find的第四个参数传true才行,他本来是`string.find(s, pattern [, init [, plain]] )`，要显式声明第四个true。这个我看项目里str库的代码传了，之前的大佬太猛了。但是后面一些str操作就没有了，如果哪天项目测试压力小一点，考虑给项目里面换成ngx.re，因为用的地方太多了，换的话就也不太好换，但先记住这个find很蠢
+    - string.byte，据说这个是神器，string.char(string.byte("abc", 1, 2)) 比string.sub的写法少生成很多中间string，让我来试试，测试用1000长度的字符串随机两个pos，分别用string.sub(posa, posb), string.char(string.byte("abc", posa, posb))比对运行时间
+        ```lua
+        local sz = 1000
+
+        local str
+        
+        local a = table.new(sz, 0)
+        for i = 1, sz do
+            a[i] = math.random(9)
+        end
+        
+        str = table.concat(a)
+        
+        -- 0s
+        local function test_a()
+            local t = table.new(1000, 0)
+            for i = 1, 1000 do
+                local pa = math.random(sz - 100)
+                local pb = pa + math.random(sz - pa)
+                t[i] = string.sub(str, pa, pb)
+            end
+        end
+        
+        -- 0.0019998550415039s
+        local function test_b()
+            local t = table.new(1000, 0)
+            for i = 1, 1000 do
+                local pa = math.random(sz - 100)
+                local pb = pa + math.random(sz - pa)
+                t[i] = string.char(string.byte(str, pa, pb))
+            end
+        end
+        ```
+        测试并没有得到我想要的结果，byte这样会更慢，应该是char+byte是两步操作，且sub和char，byte都不在NYI里面，所以单独效率上没有区别，那再看看后面这种是否比sub更节约内存，top了一下分别运行，感觉没有，内存是一样的。
+        说明string.sub是可以用的操作，OpenResty最佳实践的作者可能版本老一些，或者我测试的姿势不对.
+        
+    
+    os
+    ====
+    
+    Lua的os，io库都是同步阻塞操作，而OpenResty的理念是同步非阻塞，他有一套自己的shell工具`resty.shell`，用于执行shell语句，大概长这样：
+    ```lua
+    local resty_shell = require 'resty.shell'
+    local ok, res, err, reason, status = resty_shell.run([[
+        echo lunlungaygay
+    ]])
+    if ok then
+        ngx.say(res)
+    end
+    ```
+    io同样有一套，如果以前没有需要重新编译nginx
+    ```lua
+    local ngx_io = require 'ngx.io'
+    local path = 'xxx'
+    local file, err_1 = ngx_io.open(path, 'rb')
+    local data, err_2 = file:read('*a')
+    file:close()
+    ```
+    项目里用到shell操作的也就取时间，os.date啥的，比较轻量，还没有成为性能瓶颈，就先不优化了，将来有哪些大型shell操作，再考虑用这个解决。
+    
+    另外课上有句话说的我很认同，io和CPU消耗不会消失，他只是去了另一个地方，所以当有这种大型的磁盘读写，CPU计算的时候，可以适当交给别的服务做。这一点项目里的体现就是lua-battle，他把大量的CPU计算用resty.http扔给了另一台机器做，resty.http是基于cosocket的http模块，发过去之后worker会把当前请求yield掉，主要提供服务的机器CPU就能处理别的请求了，等战斗的机器处理完结果，这个战斗的请求又会被resume回来，这样就不会有一个worker一直用CPU，阻塞了其他请求的情况。
+    
+    lua部分的坑先开到这里
