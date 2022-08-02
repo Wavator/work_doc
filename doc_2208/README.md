@@ -162,7 +162,6 @@
     
     LuaJit ~= Lua5.1，用的时候还是要仔细选择高性能接口。Jit的原理基础的都懂，高深的暂时没有研究的想法。
     
-    另外看github有个开源工具[lj-releng](https://github.com/openresty/openresty-devel-utils/blob/master/lj-releng),可以扫Jit2.1语法，现在内网vim是Lua5.1语法，table.new是红色的，试试在内网给他进行一个装。
     
     test
     ====
