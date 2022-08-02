@@ -287,3 +287,9 @@
     另外课上有句话说的我很认同，io和CPU消耗不会消失，他只是去了另一个地方，所以当有这种大型的磁盘读写，CPU计算的时候，可以适当交给别的服务做。这一点项目里的体现就是lua-battle，他把大量的CPU计算用resty.http扔给了另一台机器做，resty.http是基于cosocket的http模块，发过去之后worker会把当前请求yield掉，主要提供服务的机器CPU就能处理别的请求了，等战斗的机器处理完结果，这个战斗的请求又会被resume回来，这样就不会有一个worker一直用CPU，阻塞了其他请求的情况。
     
     lua部分的坑先开到这里
+    最后写一下我vimrc里面支持luajit的配置
+    ```vim
+    let g:syntastic_check_on_open = 1
+    let g:syntastic_lua_checkers = ["luac", "luacheck"]
+    let g:syntastic_lua_luacheck_args = "--no-unused-args --std luajit --globals ngx"
+    ```
