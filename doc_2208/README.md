@@ -14,6 +14,7 @@
         - [basic](#openresty-basic)
         - [cosocket](#cosocket)
         - [lua-resty-core](#lua-resty-core)
+        - [cache](#cache)
 
 线上事故总结
 ====
@@ -327,4 +328,28 @@
     两者对比的优缺点还是很显然的，ffi是Jit提供的，很显然可以被Jit优化，而且写起来更简单，不用去栈里把返回值扣出来。但缺点是这个内存在某些情况下要你自己管理，如果是Lua C Function，那因为这个栈在Lua这边，所以GC一下没引用就没了。但是ffi的内存并不全是Lua管理的，也就是`ffi.new`返回的是cdata，这部分是LuaJit管理，`ffi.C.malloc`这样就是申请了一块C内存，需要`local p = ffi.gc(ffi.C.malloc(n), ffi.C.free)`，给他注册一个gc回调，p = nil的时候这个就被释放了。这样其实也有个好处，他可以突破OpenResty对Lua Vm 2G内存的限制
     
     然后去项目里看看，发现OpenResty的版本比较低，实际上也没在init阶段require，相当于我们项目还是lua-nginx-module 的实现，这个如果底层的ngx.xxx成为性能瓶颈，可以成为一个优化的点
+    
+    cache
+    ====
+    
+    项目里用cache的地方不多，主要原因是大部分数据其实在redis里，mysql里面都是一些战报之类的数据，战报数据比较冷。
+    
+    用到的地方大概就是存gate信息的地方，存google cloud token的地方，这种是因为每个请求都要访问，属于过热的数据，就在cache里给他缓存了一层。当然也有在worker层面缓存的数据，主要是一些重构的表，一些redis脚本的sha1值之类的。但是这些没有用到cache api，而是直接
+    ```lua
+    local data_by_activity_id = nil
+    
+    function _M:get_datas_by_activity_id(activity_id)
+        if data_by_activity_id == nil then
+            -- init cache
+            ...
+        end
+        return data_by_activity_id[activity_id]
+    end
+    ```
+    这种就比较简陋，但也能用，也满足我们reload worker的时候清空的需求。
+    
+    cache的话OpenResty主要提供两种，`ngx.shared.dict` 和`resty.lrucache` ,主要区别是dict是跨worker共享的，lrucache是单worker的数据。这两个就不会被reload干掉，放在我们项目，shared dict有网关或者token的应用场景，lrucache暂时没有
+    
+    
+    
     
