@@ -436,9 +436,24 @@
 
     我一般找到性能瓶颈之后，优化具体的接口我都是用[test](#test) 模块的办法自己写个command脚本，判断一下是否优化成功。wrk可以当成一个工具技能，先留着，相信早晚一天有用
     
+    火焰图
+    ====
     
+    这个目前项目里有on-cpu的火焰图，一般是看那个。具体的图不方便放，上个月的文档里介绍了[openresty-systemtap](https://github.com/Wavator/openresty-systemtap-toolkit)这个东西，使用它定位了一个worker 100%跑满CPU的问题，但是实际应用中，这种死循环的情况并不多见，更多的时候是玩家感觉卡顿，要分析代码性能。
     
+    这种时候就轮到火焰图出场了，用上面的工具结合[FlameGraph](https://github.com/brendangregg/FlameGraph)线上CPU高过一定值的时候会自动采样，并记录结果。
+    ```shell
+    TAPPATH=xxxxx
+    FLAMEPATH=xxxxxxx
     
+    pid,cpuload=#top+grep+awk print $1,$9+sort筛出一个最高的pid和cpuload
+    #cpuload比较大就执行抓+存+推送的流程，我猜是这样写的，图省事可以全拿出来
+    ${TAPPATH}/ngx-sample-lua-bt -p ${pid} --luajit20 -t 5 > /tmp/tmp.bt
+    ${TAPPATH}/fix-lua-bt /tmp/tmp.bt > /tmp/tmp_1.bt
+    ${FLAMEPATH}/stackcollapse-stap.pl /tmp/tmp_1.bt > /tmp/a.cbt
+    ${FLAMEPATH}/flamegraph.pl /tmp/a.cbt > /tmp/a.svg
     
+    #scp或者ftp之类的把这个a.svg换个名字发出去，放到网页上大家就都能看了
+    ```
     
     
