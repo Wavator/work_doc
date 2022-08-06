@@ -25,8 +25,8 @@
 - 按月总结的bug,后端问题排查和优化
     - [2207](doc_2207/README.md)
         - [排查redis连接数过高](doc_2207#p1)
-        - [排查nginx worker CPU占用100%](doc_2207/README.md)
-        - [http模块版本较低踩坑](doc_2207/README.md)
+        - [排查nginx worker CPU占用100%](doc_2207#p2)
+        - [http模块版本较低踩坑](doc_2207#p3)
     
     - [2208](doc_2208/README.md)
         - 天赋模块bug，战报反SQL注入转义bug，userData:NULL bug
