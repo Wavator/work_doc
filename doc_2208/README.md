@@ -15,6 +15,10 @@
         - [cosocket](#cosocket)
         - [lua-resty-core](#lua-resty-core)
         - [cache](#cache)
+    
+    - [压力测试和火焰图](#压力测试和火焰图)
+        - [wrk](#wrk)
+        - [火焰图](#火焰图)
 
 线上事故总结
 ====
@@ -349,6 +353,91 @@
     这种就比较简陋，但也能用，也满足我们reload worker的时候清空的需求。
     
     cache的话OpenResty主要提供两种，`ngx.shared.dict` 和`resty.lrucache` ,主要区别是dict是跨worker共享的，lrucache是单worker的数据。这两个就不会被reload干掉，放在我们项目，shared dict有网关或者token的应用场景，lrucache暂时没有
+    
+    
+    
+    压力测试和火焰图
+    ====
+    
+    wrk
+    ====
+    
+    wrk是一款比较好用的压力测试工具，他相比较ab而言的最大优点是可以很轻松的多线程压测，单命令可以比较容易的产生跑满OpenResty的所有worker的压力（可以自定义压测线程数），并且可以自定义Lua脚本（也就是支持用Lua去模拟真实的请求）
+    
+    ```shell
+    (base) ➜  ~wrk --help
+    Usage: wrk <options> <url>                            
+      Options:                                            
+        -c, --connections <N>  Connections to keep open   
+        -d, --duration    <T>  Duration of test           
+        -t, --threads     <N>  Number of threads to use   
+    
+        -s, --script      <S>  Load Lua script file       
+        -H, --header      <H>  Add header to request      
+            --latency          Print latency statistics   
+            --timeout     <T>  Socket/request timeout     
+        -v, --version          Print version details      
+    
+      Numeric arguments may include a SI unit (1k, 1M, 1G)
+      Time arguments may include a time unit (2s, 2m, 2h)
+
+    ```
+    
+    c，d，t之类的都比较好理解，主要看这个-s，有几个操作
+    ```lua
+    -- 线程建立的时候有这个走这个
+    function setup(thread)
+    -- 运行时
+    
+    -- 单线程取命令行参数
+    function init(args)
+    -- 相邻请求延迟时间，更精细的控制-d
+    function delay()
+    -- 每次请求调用，可以生成body，官方建议是写一些简单的逻辑在里面，或者固定，不然就成了测试wrk本身的性能了
+    function request()
+    -- 解析结果，官方建议是不写，这样wrk就可以不解析header和body，节省时间
+    function response(status, headers, body)
+    
+    -- 测试全部结束，可以自己处理一下结果
+    function done(summary, latency, requests)
+    
+    
+    -- 全局表
+    wrk = {
+        scheme  = "http",
+        host    = "localhost",
+        port    = 8080,
+        method  = "POST",
+        path    = "/",
+        headers = {},
+        body    = nil,
+        thread  = <userdata>,
+        format = function(method, path, headers, body)
+        end,
+        lookup = function(host, service)
+        end,
+        connect = function(addr)
+        end,
+    }
+    
+    -- 大概往我们战斗服发一下, 先打一场战斗，在Luaserver 把body存到文件battle
+    local file = io.open('battle')
+    local body = file:read('*a')
+    file:close()
+    wrk.method = "POST"
+    wrk.body = body
+    wrk.headers["Content-Type"] = "application/x-www-form-urlencoded"
+    
+    request = function()
+        return wrk.format('POST', '/battle/v1')
+    end
+    ```
+    上面就用wrk给我们战斗服发了一堆相同的战斗。实际应用中我们暂时用不到压力测试，一般都是火焰图看看是哪个函数，继而优化。
+
+    我一般找到性能瓶颈之后，优化具体的接口我都是用[test](#test) 模块的办法自己写个command脚本，判断一下是否优化成功。wrk可以当成一个工具技能，先留着，相信早晚一天有用
+    
+    
+    
     
     
     
