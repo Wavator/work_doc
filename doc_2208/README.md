@@ -3,6 +3,12 @@
 - [线上事故总结](#线上事故总结)
     - [天赋模块](#天赋模块)
 
+- [线上后端优化](#线上后端优化)
+    - [活动道具清理](#活动道具清理)
+    - [佣兵装备](#佣兵装备)
+    - [佣兵登陆信息](#佣兵登陆信息)
+    - [公会成员列表](#公会信息获取)
+
 线上事故总结
 ====
 
@@ -141,3 +147,71 @@
     总结就是写完再仔细看看，当时内网发现了这个问题，所以测了的战斗模块改掉了，但是有些模块上了家具似乎完全没有测试。我觉得没有预警到巅峰竞技场的config有类似问题是我的问题，但是没测这个就和时间太紧有关系吧。
     
     为了提升周末的生活质量，写的时候还是要谨慎小心。
+
+
+    线上后端优化
+    ====
+    
+    活动道具清理
+    ====
+    
+    我们活动结束后经常需要回收玩家的道具，发一些邮件，之前是对于每个not open的活动，回收活动里的道具。大概这样：
+    ```lua
+    
+    for _, id in ipairs(activity_ids) do
+        local act = mgr:get_act(player_id, id)
+        if not act:is_open() then
+            act:clear_items()
+        end
+    end
+    
+    ```
+    
+    随着活动表越配越多，这个方式出现了很大的问题，is_open的时候，一般是hmget一下开始结束时间和当前时间判断，clear的时候，再hmget几个活动的具体数据拿出来看看，我们一般hash存，拿出来split，split的代码还是string.find, string.sub的（这里我一直想换成ngx_re，但所有活动都在用这个，还得慎重考虑一下）。这里冗余操作就很多，一个是频繁判断is_open，要hmget，第二个是关闭的活动反复清理，还要hmget，这个get出来还得split
+    
+    大概思路是找个set把已经清的存一下，内网开活动的时候记一个count给他删掉
+    
+    ```lua
+    local members = rd:smembers(act_clear_key)
+    local len = #members
+    local is_member = table.new(0, len)
+    for i = 1, len do
+        is_member[tonumber(members[i])] = true
+    end
+
+    local real_clears = {}
+    for _, id in ipairs(activity_ids) do
+        if not is_member[id] then
+            local act = self:get_act(player_id, id)
+            --[[
+                这里没有批量获取is open，是因为不同活动is open判断不同
+                这里统一判断会导致一些活动不清理
+                成功清理的放到已经清理列表，这样尽量保证玩家列表都是玩家见过的活动
+            ]]
+            local f = act:clear_items()
+            if f then
+                table.insert(real_clears, id)
+            end
+        end
+    end
+    rd:sadd(act_clear_key, unpack(real_clears))
+    ```
+    就是每个玩家维护了一个已经清理过的set，这个后续还有优化空间，主要是针对内存和存取，但是我并不打算过早优化。第一是分key避免活动太多，目前的线上redis实例 intset的最大值是512，需要清理的活动在80左右，按照每周增加2个需要清理的活动，增加到512是超过6年的时间。且我只会放玩家看到过的活动，也就是玩了6年游戏的玩家的intset才会变成hashset，导致存储变大。我们游戏他真玩六年就让他大一点好了我觉得233333. 第二是改成sscan，也没必要，smembers不过On，拿1000以内完全不会对redis造成影响，他真1000个活动了，那个redis估计已经没人了（我们递增玩家id分配redis），第三是改为bitset，也没必要，主要是我怕策划配了个99999活动直接G了，很难对策划有要求说活动id不能太大，而且bit全量拿比较麻烦。优化不应该被过度设计，现在这样简单能用，火焰图体现明显，是合理的优化。
+    
+    佣兵装备
+    ====
+    
+    前同事略摆，前端算个装备算不对，每次战斗都问后端请求佣兵具体信息。
+    这个就让前端把后端代码抄一遍，不要每次都请求。
+    
+    佣兵登陆信息
+    ====
+    
+    这个火焰图吓我一跳，一个系统顶七八个竞技场的消耗。
+    这个主要是登陆的时候要拿公会+好友的佣兵具体信息（占了这个模块98%的CPU，总登陆的50%以上），完全没必要，登陆的时候不给这些信息，点进系统才给。
+    
+    公会信息获取
+    ====
+    
+    公会成员信息这里比较卡，主要是个人信息多，相当于70个人走70个hmget，中间还有很多hget，大概200个左右redis操作，火焰图发现堆栈是get_info->redis:read_body, get_active->redis:read_body
+    这种就是redis操作太多次了，pipeline可以优化时间，CPU应该可以相应减少，body总大小没变，相当于连接取出到唤醒的次数变少了，redis发一下把自己挂起，调度别人，这个过程是epoll做的，相当于还是有不小的CPU调度消耗，我们项目没有off cpu火焰图，但是他一定和这种openresty网络io相关。效果上确实下来了。
