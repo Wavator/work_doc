@@ -99,7 +99,7 @@ p3
 
 项目要向大数据pub打点数据，他是个HTTPS，因为之前我们跟平台或者游戏内不同后端机器通信都是用的HTTP，没有用过HTTPS，在开始的时候踩了很多坑（因为网上很多文档没有resty.http的较老版本使用，官方文档也比较难找
 
-- 较低版本需要手动握手，需要`hc:ssl_handshake(false, host, false)` 
+- 需要手动握手，需要`hc:ssl_handshake(false, host, false)` 
     https://github.com/openresty/lua-nginx-module#tcpsocksslhandshake
     第一个false因为启用了连接池，所以不需要true，第三个false表示不验证CA certificates
 - pub的时候发现分配不出去端口，几条正常的协议中间就会有几条`can't assign` ,这个是比较离谱的，我们测试服空闲端口应该挺多的，sysctl一顿乱改ipv4配置，一点都没用。问其他项目后端也不知道怎么解决。后来问了运维，他改了nginx的resolver配置，解决了这个问题，也就是resolver ipv6=off，也就是nginx自己实现的类似DNS的东西，不关ipv6回随机用ipv4或者ipv6去解析大数据的hostname，ipv6的时候会有问题。
