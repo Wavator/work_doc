@@ -348,11 +348,11 @@
     redis-string
     =====
     
-    string应该是redis里面比较简单的结构，其实注意int，embstr，raw就行
+    string应该是redis里面比较简单的结构，只有SDS一种实现，编码上注意int，embstr，raw就行
     1. int不是无上限的，超出再incr会抛出异常，所以这个指令或者说redis里面所有xxxincr，xxxincrby都要注意这一点。当然出问题一般内网就直接看到了。另外redis的整数类型也有池子，但是内存淘汰策略开启了LRU之类的策略之后这个就没用了，因为指到常量对象上不好统计引用。
     2. embstr就是很短的字符串，老版本39位，新版本44位，优点是内存是一次申请完的连续内存，更紧凑，没有指针乱指，只要释放一次，且查找更快。业务里一般无法避免value太长，但是可以注意的是整个redis的string是一种实现，都适用这些策略。
     3. raw就是最一般的那种redis-str，SDS最基本的实现，没有什么优化。
-    4. redis里面的字符串，维护了长度（保证二进制安全，避免strlen等优点），维护了编码（都要维护），所以一个string object本身就是有一个基础大小在这里的，如果短string特别多，就会严重浪费内存。这种情况可以考虑通过一些id的映射，让这些短string存在hashset之类的结构里（当然hashset的encoding要ziplist，比如/500之后500落到一个hashkey里，这500个小str就共享一个ziplist了）。
+    4. redis里面的字符串，维护了长度（保证二进制安全，避免strlen等优点），维护了编码（都要维护），所以一个string object本身就是有一个基础大小在这里的，如果短string特别多，就会严重浪费内存。这种情况可以考虑通过一些id的映射，让这些短string存在hashset之类的结构里（当然hashset的encoding要ziplist，比如线上hash zip entries设置512，那id/500之后500落到一个hashkey里，这500个小str就共享一个ziplist了）。
     
     
     
