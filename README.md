@@ -23,6 +23,7 @@
 
 - [redis](#redis)
     - [string](#redis-string)
+        - [code](#redis-string-code)
     
 - [性能优化](#性能优化)
     
@@ -40,6 +41,7 @@
             - 活动道具
             - 公会信息
             - 竞技场信息
+            - 战力模块
 
     OpenResty
     ====
@@ -354,7 +356,139 @@
     3. raw就是最一般的那种redis-str，没有什么优化，申请内存就是倍增到MB之后每次增加1MB，当然我们线上也没这么大的KEY。
     4. redis里面的字符串，维护了长度（保证二进制安全，避免strlen等优点），维护了编码（都要维护），所以一个string object本身就是有一个基础大小在这里的，如果短string特别多，就会严重浪费内存。这种情况可以考虑通过一些id的映射，让这些短string存在hashset之类的结构里（当然hashset的encoding要ziplist，比如线上hash zip entries设置512，那id/500之后500落到一个hashkey里，这500个小str就共享一个ziplist了）。
     
+    redis-string-code
+    ====
     
+    1. 编译优化
+    ```c
+    struct __attribute__ ((__packed__)) sdshdr5 {
+        unsigned char flags; /*SDS类型*/
+        char buf[];
+    };
+    struct __attribute__ ((__packed__)) sdshdr8 {
+        uint8_t len; /* 现有长度*/
+        uint8_t alloc; /* 已经分配的空间 */
+        unsigned char flags; /* 类型 */
+        char buf[];
+    };
+    struct __attribute__ ((__packed__)) sdshdr16 {
+        uint16_t len;
+        uint16_t alloc;
+        unsigned char flags;
+        char buf[];
+    };
+    ```
+    `__attribute__ ((__packed__))` 是紧凑分配内存的编译器优化项，c默认会按照8字节对齐的方式给结构体分配内存，向上分配最近的一个8的倍数。这样如果是特别短的字符串会浪费几个字节。
+    然后他shshdr*，除了5之外都有2个uint*_t, unit*_t用来表示字符串长度和当前申请的内存，对不同长度的字符串用不同的unit记录这些数据，可以节约内存。
+    
+    2. string编码的部分，现在的object.c里面写的代码是
+    ```c
+    #define OBJ_ENCODING_EMBSTR_SIZE_LIMIT 44
+    robj *createStringObject(const char *ptr, size_t len) {
+        if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT)
+            return createEmbeddedStringObject(ptr,len);
+        else
+            return createRawStringObject(ptr,len);
+    }
+    ```
+    这个我看的第一本书说是39，应该比较老了，git看是3.0就是44了
+    
+    embtr申请内存是
+    ```c
+    robj *createEmbeddedStringObject(const char *ptr, size_t len) {
+        robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+        struct sdshdr8 *sh = (void*)(o+1);
+        ...
+    }
+    ```
+    一次把robj的和sdshdr8的都申请出来了，所以说是申请一次，释放一次。
+    
+    3. 整数池的使用
+    ```c
+    robj *createStringObjectFromLongLongWithOptions(long long value, int valueobj) {
+        robj *o;
+    
+        if (server.maxmemory == 0 ||
+            !(server.maxmemory_policy & MAXMEMORY_FLAG_NO_SHARED_INTEGERS))
+        {
+            /* 这一行时说如果没有设置内存淘汰策略（swap），或者说策略不是某种策略（其实是LRU和LFU），就默认启用小整数对象池 */
+            valueobj = 0;
+        }
+    
+        // 小整数
+        if (value >= 0 && value < OBJ_SHARED_INTEGERS && valueobj == 0) {
+            incrRefCount(shared.integers[value]);
+            o = shared.integers[value];
+        } else {
+            // longlong内encode才是int，否则就是str
+            if (value >= LONG_MIN && value <= LONG_MAX) {
+                o = createObject(OBJ_STRING, NULL);
+                o->encoding = OBJ_ENCODING_INT;
+                o->ptr = (void*)((long)value);
+            } else {
+                o = createObject(OBJ_STRING,sdsfromlonglong(value));
+            }
+        }
+        return o;
+    }
+    
+    /* 比较具体的值new一般是这个 */
+    robj *createStringObjectFromLongLong(long long value) {
+        return createStringObjectFromLongLongWithOptions(value,0);
+    }
+    
+    /* 一般是key调用这个，方便统计引用次数 */
+    robj *createStringObjectFromLongLongForValue(long long value) {
+        return createStringObjectFromLongLongWithOptions(value,1);
+    }
+    ```
+    
+    内存淘汰的部分，可以看到LRU和LFU才会完全禁用小整数对象池
+    ```c
+    #define MAXMEMORY_FLAG_NO_SHARED_INTEGERS \
+        (MAXMEMORY_FLAG_LRU|MAXMEMORY_FLAG_LFU)
+    ```
+    
+    4. 一个最大的redis string是512M
+    ```c
+    createLongLongConfig("proto-max-bulk-len", NULL, DEBUG_CONFIG | MODIFIABLE_CONFIG, 1024*1024, LONG_MAX, server.proto_max_bulk_len, 512ll*1024*1024, MEMORY_CONFIG, NULL, NULL),
+    ```
+    
+    5. 内存申请1MB以下倍增，以上每次加1MB
+    ```c
+    #define SDS_MAX_PREALLOC (1024*1024)
+        sds _sdsMakeRoomFor(sds s, size_t addlen, int greedy) {
+        ... 
+        len = sdslen(s);
+        sh = (char*)s-sdsHdrSize(oldtype);
+        reqlen = newlen = (len+addlen);
+        if (greedy == 1) {
+            if (newlen < SDS_MAX_PREALLOC)
+                newlen *= 2;
+            else
+                newlen += SDS_MAX_PREALLOC;
+        }
+    
+        type = sdsReqType(newlen);
+        ... 
+        return s;
+    }
+    
+    ```
+    
+    6. 注意redis的key都是sds
+    ```c
+    void dbAdd(redisDb *db, robj *key, robj *val) {
+        sds copy = sdsdup(key->ptr);
+        ...
+    }
+
+    ```
+    
+    Redis Server读取client的请求的时候，会先读如缓冲区，这个缓冲区也是SDS
+    AOF缓冲区也是SDS
+    
+    string的部分先整理到这里
     
     性能优化
     ====
