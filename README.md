@@ -22,10 +22,11 @@
         - [火焰图](#火焰图)
 
 - [redis](#redis)
-    - [string](#redis-string)
-        - [code](#redis-string-code)
-    - [hsahmap](#redis-hashmap)
-        - [code](#redis-hashmap-code)
+    - [base-data-structure](#redis-data-structure)
+        - [string](#redis-string)
+            - [code](#redis-string-code)
+        - [hash](#redis-hash)
+            - [code](#redis-hash-code)
     
 - [性能优化](#性能优化)
     
@@ -349,6 +350,11 @@
     
     redis的学习基于两本书和一节课，《Redis开发与运维》，《Redis设计与实现》，第一本我拿来当作工具书，一些场景里的命令和基本原理，都是看这本书学习的，第二本书是我看源码分析的书，写doc的时候还在慢慢看这本书。这两本书都比较不错，但是redis版本有些老，后面极客时间上也学习了蒋德钧老师的《Redis核心技术与实战》，这门课的课程本身和评论区让我大受启发，本来doc里不准备写redis的，但学了这门课之后深感Redis的学习还是太浅。准备把课程中和评论区的一些实战经验，设计经验加以整理。
     
+    redis-data-structure
+    ====
+    
+    redis的基础数据结构
+    
     redis-string
     =====
     
@@ -492,7 +498,7 @@
     
     string的部分先整理到这里
     
-    redis-hashmap
+    redis-hash
     ====
     
     1. 4.0以后的hash算法是siphash
@@ -502,7 +508,7 @@
     5. rehash判断的时候，如果能找到AOF重写或者RDB生成之类的子进程，哈希因子就会变成5，也就是严重冲突的时候依然会rehash
     6. 很多上层数据结构，和redis本身的kvdb，过期键之类的都是hash的实现，hash是最基本的数据结构之一
     
-    redis-hashmap-code
+    redis-hash-code
     ====
     
     1. hash算法的选择
