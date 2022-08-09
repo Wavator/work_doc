@@ -399,7 +399,18 @@
             return createRawStringObject(ptr,len);
     }
     ```
-    这个我看的第一本书说是39，应该比较老了，git看是3.0就是44了
+    这个我看的第一本书说是39，应该比较老了，git看是3.0就是44了,39算的比较粗糙，实际上是一次内存申请出来是64，减掉redisObject这个结构自带的16，再减sds自带的维护长度内存类型的3，再减一个'\0'，一共就是44.
+    ```c
+    typedef struct redisObject {
+        unsigned type:4;
+        unsigned encoding:4;
+        unsigned lru:LRU_BITS; /* lru time (relative to server.lruclock) */
+        int refcount;
+        void *ptr;
+    } robj;
+    ```
+    
+    这里是4+4+8=16，为什么最上面三个unsigned是4，原因是redis用了: ，也就是位域定义，来极致的节省内存，也就是这个unsigned有32位，type拿4位，encoding拿4位，剩下24位给lru。
     
     embtr申请内存是
     ```c
