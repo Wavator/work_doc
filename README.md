@@ -25,8 +25,8 @@
     - [base-data-structure](#redis-data-structure)
         - [string](#redis-string)
             - [code](#redis-string-code)
-        - [hash](#redis-hash)
-            - [code](#redis-hash-code)
+        - [hashtable](#redis-hashtable)
+            - [code](#redis-hashtable-code)
     
 - [性能优化](#性能优化)
     
@@ -498,7 +498,7 @@
     
     string的部分先整理到这里
     
-    redis-hash
+    redis-hashtable
     ====
     
     1. 4.0以后的hash算法是siphash
@@ -508,7 +508,7 @@
     5. rehash判断的时候，如果能找到AOF重写或者RDB生成之类的子进程，哈希因子就会变成5，也就是严重冲突的时候依然会rehash
     6. 很多上层数据结构，和redis本身的kvdb，过期键之类的都是hash的实现，hash是最基本的数据结构之一
     
-    redis-hash-code
+    redis-hashtable-code
     ====
     
     1. hash算法的选择
