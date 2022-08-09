@@ -24,6 +24,8 @@
 - [redis](#redis)
     - [string](#redis-string)
         - [code](#redis-string-code)
+    - [hsahmap](#redis-hashmap)
+        - [code](#redis-hashmap-code)
     
 - [性能优化](#性能优化)
     
@@ -489,6 +491,207 @@
     AOF缓冲区也是SDS
     
     string的部分先整理到这里
+    
+    redis-hashmap
+    ====
+    
+    1. 4.0以后的hash算法是siphash
+    2. hash的元素个数太多的时候会检查是否需要扩容,总是拓展成2^x
+    3. rehash是渐进式的，全局表有个定时器，太久没访问一次删一百个哈希桶，自己定义的表每次操作清一个哈希桶
+    4. rehash没完成的时候不能再rehash
+    5. rehash判断的时候，如果能找到AOF重写或者RDB生成之类的子进程，哈希因子就会变成5，也就是严重冲突的时候依然会rehash
+    
+    redis-hashmap-code
+    ====
+    
+    1. hash算法的选择
+        redis 当前版本是siphash，但是算法细节没有过多了解。
+        ```c
+        /* The default hashing function uses SipHash implementation
+         * in siphash.c. */
+        
+        uint64_t siphash(const uint8_t *in, const size_t inlen, const uint8_t *k);
+        uint64_t siphash_nocase(const uint8_t *in, const size_t inlen, const uint8_t *k);
+        
+        uint64_t dictGenHashFunction(const void *key, size_t len) {
+            return siphash(key,len,dict_hash_function_seed);
+        }
+        ```
+    2. hash拓展逻辑：每次expand拓展到下一个2^x
+    ```c
+    static signed char _dictNextExp(unsigned long size)
+    {
+        unsigned char e = DICT_HT_INITIAL_EXP;
+    
+        // 不能超过longmax
+        if (size >= LONG_MAX) return (8*sizeof(long)-1);
+        while(1) {
+            // 每次指数左移一位
+            if (((unsigned long)1<<e) >= size)
+                return e;
+            e++;
+        }
+    }
+    
+    int _dictExpand(dict *d, unsigned long size, int* malloc_failed)
+    {
+    
+        /* 在rehash或者rehash之后的size比要用的小就不合适 */
+        if (dictIsRehashing(d) || d->ht_used[0] > size)
+            return DICT_ERR;
+    
+        dictEntry **new_ht_table;
+        unsigned long new_ht_used;
+        signed char new_ht_size_exp = _dictNextExp(size);
+    
+        /* 把幂次拿出来当新的大小 */
+        size_t newsize = 1ul<<new_ht_size_exp;
+        if (newsize < size || newsize * sizeof(dictEntry*) < newsize)
+            return DICT_ERR;
+    
+        /* rehash完是同样大小不行 */
+        if (new_ht_size_exp == d->ht_size_exp[0]) return DICT_ERR;
+    
+        /*
+            下面把hash[1]的空间malloc出来，给hash[1]赋值
+        */
+        ...
+        return DICT_OK;
+    }
+    
+    /* 外部都是调用这个，如果需要拓展则变为两倍 */
+    static int _dictExpandIfNeeded(dict *d)
+    {
+        /* 还在rehash，那就不用拓展 */
+        if (dictIsRehashing(d)) return DICT_OK;
+    
+        /* 空表 */
+        if (DICTHT_SIZE(d->ht_size_exp[0]) == 0) return dictExpand(d, DICT_HT_INITIAL_SIZE);
+    
+        if (d->ht_used[0] >= DICTHT_SIZE(d->ht_size_exp[0]) &&
+            
+            // 这里是个全局设置的变量，AOF重写，RDB生成等过程，会把他设置成0，也就是不特别大的情况都不rehash
+            (dict_can_resize ||
+            // 比较哈希因子，如果特别大（这个数是5），那就只能强制rehash
+             d->ht_used[0]/ DICTHT_SIZE(d->ht_size_exp[0]) > dict_force_resize_ratio) &&
+             // 能不能申请下来这些内存
+            dictTypeExpandAllowed(d))
+        {
+            return dictExpand(d, d->ht_used[0] + 1);
+        }
+        return DICT_OK;
+    }
+    ```
+    
+    往哈希表中增加/替换/增加或查找，对应了三个接口，`dictAdd`, `dictReplace`, `dictAddOrFind`，最终逻辑都是func -> `dictAddRow` -> `_dictKeyIndex` -> `dictExpandIfNeeded`, 这就是往一个hash里添加或者修改某个值的流程
+     
+    那来看一下`dictAddRow`
+    ```c
+    dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing)
+    {
+        long index;
+        dictEntry *entry;
+        int htidx;
+    
+        // 这里让rehash前进一步，也就是redis渐进rehash的过程
+        if (dictIsRehashing(d)) _dictRehashStep(d);
+    
+        /* 相当于已经有了就return，这个函数只做增加，当然这个函数调用的时候会判断是否要rehash */
+        if ((index = _dictKeyIndex(d, key, dictHashKey(d,key), existing)) == -1)
+            return NULL;
+    
+        /* rehash的时候用1，要往新的里面加，不然用0 */
+        htidx = dictIsRehashing(d) ? 1 : 0;
+        ... /*申请一下内存*/
+        
+        /* 增加并设置，如果hash碰撞这边会通过next拉成链表 */
+        entry->next = d->ht_table[htidx][index];
+        d->ht_table[htidx][index] = entry;
+        d->ht_used[htidx]++;
+        dictSetKey(d, entry, key);
+        return entry;
+    }
+    ```
+    
+    3. rehash过程
+    刚才看到了`dictAddRow`的时候如果在rehash会`_dictRehashStep`, rehash一共有两个比较重要的函数，一个这个step，一个`dictRehash`
+    
+    ```c
+    int dictRehash(dict *d, int n) {
+        int empty_visits = n*10;
+        //主循环，根据要拷贝的链表数量n，循环n次或者ht 0的内容全部被移动到ht 1
+        while(n-- && d->ht[0].used != 0) {
+            dictEntry *de, *nextde;
+            while(d->ht_table[0][d->rehashidx] == NULL) {
+                d->rehashidx++;
+                // 这里说明拿了一个空的链表出来rehash，如果比要拷贝的十倍还多就会返回，避免拷贝太久，影响当前指令
+                if (--empty_visits == 0) return 1;
+            }
+            de = d->ht_table[0][d->rehashidx];
+            /*
+                h[0]数据删除，增加到h[1]
+            */
+            while(de) {
+                uint64_t h;
+                nextde = de->next;
+                h = dictHashKey(d, de->key) & DICTHT_SIZE_MASK(d->ht_size_exp[1]);
+                de->next = d->ht_table[1][h];
+                d->ht_table[1][h] = de;
+                d->ht_used[0]--;
+                d->ht_used[1]++;
+                de = nextde;
+            }
+            /*
+                原链表清空，rehash进度增加一次
+            */
+            d->ht_table[0][d->rehashidx] = NULL;
+            d->rehashidx++;
+        }
+        //判断rehash是否已经完成了数据转移
+        if (d->ht[0].used == 0) {
+            //释放ht[0]内存空间
+            zfree(d->ht[0].table);
+            //让ht[0]指向ht[1]，因为不rehash是存到0的，这里相当于rehash结束了，所以要01互换
+            d->ht[0] = d->ht[1];
+            //清空ht[1]，重新设置大小
+            _dictReset(&d->ht[1]);
+            //rehash结束，设置一个flag
+            d->rehashidx = -1;
+            //返回0，表示rehash完成
+            return 0;
+        }
+        //返回1，表示rehash没有完成
+        return 1;
+    }
+    //这个oneStep就是移动一个链表到h[1]，所以每次请求至多移动一个链表
+    static void _dictRehashStep(dict *d) {
+        if (d->pauserehash == 0) dictRehash(d,1);
+    }
+    ```
+    除了`dictAddRow`，还有一些函数调用的时候也会同时调用` _dictRehashStep`，一共对应了dict的大部分操作：增加(dictAddRow)，删除（dictGenericDelete），查找（dictFind），随机key(dictGenRandomKey), 随机部分key(dictGenericSomeKey)，接近于每次hash操作，都会让rehash前进一步（一个链表移走），同时empty那里保证了最多检查1*10=10张链表，保证了rehash不会拖慢这次请求太多。
+    
+    这些就是主动的渐进式rehash，除了这个之外，还有一个定时检查,`dictRehashMilliseconds`,会迁移全局hash表的数据，比如整个redis的db里的kv，整个db的过期kv等，也就是user定义的数据结构Hash Set等用到Hash的不会被这个函数影响，都是走的上面的Step函数去rehash
+    
+    ```c
+    int dictRehashMilliseconds(dict *d, int ms) {
+        if (d->pauserehash > 0) return 0;
+    
+        long long start = timeInMilliseconds();
+        int rehashes = 0;
+    
+        while(dictRehash(d,100)) {
+            rehashes += 100;
+            if (timeInMilliseconds()-start > ms) break;
+        }
+        return rehashes;
+    }
+    ```
+    
+    
+    
+    **************
+    
+    
     
     性能优化
     ====
