@@ -669,7 +669,9 @@
         if (d->pauserehash == 0) dictRehash(d,1);
     }
     ```
-    除了`dictAddRow`，还有一些函数调用的时候也会同时调用` _dictRehashStep`，一共对应了dict的大部分操作：增加(dictAddRow)，删除（dictGenericDelete），查找（dictFind），随机key(dictGenRandomKey), 随机部分key(dictGenericSomeKey)，接近于每次hash操作，都会让rehash前进一步（一个链表移走），同时empty那里保证了最多检查1*10=10张链表，保证了rehash不会拖慢这次请求太多。
+    除了`dictAddRow`，还有一些函数调用的时候也会同时调用` _dictRehashStep`，一共对应了dict的大部分操作：增加(`dictAddRow`)，删除（`dictGenericDelete`），查找（`dictFind`），随机key(`dictGenRandomKey`), 随机部分key(`dictGenericSomeKey`)，接近于每次hash操作，都会让rehash前进一步（一个链表移走），同时empty那里保证了最多检查1*10=10张链表，保证了rehash不会拖慢这次请求太多。
+    
+    这里还注意到一个细节，SomeKey这种，拿N个key，他会Step N次，也就是尝试rehash N个哈希桶，这里说明redis在保证操作复杂度不变的情况下在尽量白嫖
     
     这些就是主动的渐进式rehash，除了这个之外，还有一个定时检查,`dictRehashMilliseconds`,会迁移全局hash表的数据，比如整个redis的db里的kv，整个db的过期kv等，也就是user定义的数据结构Hash Set等用到Hash的不会被这个函数影响，都是走的上面的Step函数去rehash
     
