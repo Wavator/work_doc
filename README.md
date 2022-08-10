@@ -707,8 +707,125 @@
     }
     ```
     
+    ziplist
+    ====
+
+    redis 部分底层结构是用ziplist来节约空间的，hash元素较少，zset元素较少的时候，均会使用ziplist的底层结构，ziplist底层上是一整块连续的内存。每个元素都会保存上一个元素的大小（并且采用尽量短的数据类型保存），当前项的编码，以及当前项的具体数据，也就是
+    ```c
+    typedef struct zlentry {
+        // xxlensize 代表记录xxlen用的大小
+        unsigned int prevrawlensize;
+        unsigned int prevrawlen;
+        unsigned int lensize;
+        unsigned int len;
+
+        unsigned int headersize;     /* prevrawlensize + lensize. */
+        unsigned char encoding;      /* ZIP_STR_* or ZIP_INT_* */
+        unsigned char *p;
+    } zlentry;
+    ```
+    整个ziplist是<zlbytes> <zltail> <zllen> <entry> <entry> ... <entry> <zlend>
+    ziplist有一些性能问题，主要看insert函数
+
+    ```c
+    unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen) {
+        size_t curlen = intrev32ifbe(ZIPLIST_BYTES(zl)), reqlen, newlen;
+        ... //取当前prevlen等值
     
+        -- 根据是不是整数、整数类型/字符串实际大小分配空间
+        if (zipTryEncoding(s,slen,&value,&encoding)) {
+            reqlen = zipIntSize(encoding);
+        } else {
+            reqlen = slen;
+        }
+        // 把自己的prevlen也加进去
+        reqlen += zipStorePrevEntryLength(NULL,prevlen);
+        // 计算encoding大小
+        reqlen += zipStoreEntryEncoding(NULL,encoding,slen);
     
+        int forcelarge = 0;
+        -- 插入位置的prevlen和实际的prevlen差, forcelarge说明没变，直接扩充，nextdiff不为0就会连锁更新
+        nextdiff = (p[0] != ZIP_END) ? zipPrevLenByteDiff(p,reqlen) : 0;
+        if (nextdiff == -4 && reqlen < 4) {
+            forcelarge = 1;
+            nextdiff = 0;
+        }
+    
+        //分配这次的空间大小
+        newlen = curlen+reqlen+nextdiff;
+        zl = ziplistResize(zl,newlen);
+    
+        .. // 申请这次的空间
+
+        // 检查是不是要连锁更新
+        if (nextdiff != 0) {
+            offset = p-zl;
+            zl = __ziplistCascadeUpdate(zl,p+reqlen);
+            p = zl+offset;
+        }
+    
+        ... //保存值
+        return zl;
+    }
+    ```
+
+    连锁更新主要是后面节点的prelensize不足以保存现在的大小，发生的时候，需要给下一个更多的空间保存，给下一个更多的空间会导致下一个增大，就需要修改下下个的prevlen，如果也不足以表示，就会继续扩充，一直到最后。这种发生的概率并不大，应该只有所有数据都很临界的时候，插入了一个比临界大的，出现这种情况。但是ziplist本身的问题不止有极端情况下连锁更新导致的频繁内存操作，还有一个问题就是他的查询也是链式的。所以上层结构hash和zset会定一个使用ziplist的最大大小，避免太大导致效率大打折扣。
+    
+    针对这些问题，redis对ziplist提出了两种优化，quicklist和listpack，分别应用于list和stream等结构
+
+    quicklist
+    ====
+
+    quicklist简单来说就是一堆ziplist连起来 z1<->z2<->z3<->...<->zn
+    他设计出来主要是解决ziplist访问效率问题
+
+    ```c
+    typedef struct quicklistNode {
+        struct quicklistNode *prev;     //前一个quicklistNode
+        struct quicklistNode *next;     //后一个quicklistNode
+        unsigned char *zl;              //quicklistNode指向的ziplist
+        unsigned int sz;                //ziplist的字节大小
+        unsigned int count : 16;        //ziplist中的元素个数
+        unsigned int encoding : 2;   //编码格式，原生字节数组或压缩存储
+        unsigned int container : 2;  //存储方式
+        unsigned int recompress : 1; //数据是否被压缩
+        unsigned int attempted_compress : 1; //数据能否被压缩
+        unsigned int extra : 10; //预留的bit位
+    } quicklistNode;
+
+    typedef struct quicklist {
+        quicklistNode *head;      //quicklist的链表头
+        quicklistNode *tail;      //quicklist的链表尾
+        unsigned long count;     //所有ziplist中的总元素个数
+        unsigned long len;       //quicklistNodes的个数
+        ...
+    } quicklist;
+    ```
+    
+    增加的时候先检查能不能插入当前ziplist而不连锁改变prevlen，不可以则新建一个节点
+    数量不满足也会新建，具体逻辑在_quicklistNodeAllowInsert中
+    ```c
+    int quicklistPushHead(quicklist *quicklist, void *value, size_t sz) {
+        ...
+        if (likely(
+                _quicklistNodeAllowInsert(quicklist->head, quicklist->fill, sz))) {
+            quicklist->head->entry = lpPrepend(quicklist->head->entry, value, sz);
+            quicklistNodeUpdateSz(quicklist->head);
+        } else {
+            quicklistNode *node = quicklistCreateNode();
+            node->entry = lpPrepend(lpNew(0), value, sz);
+            quicklistNodeUpdateSz(node);
+            _quicklistInsertNodeBefore(quicklist, quicklist->head, node);
+        }
+        ...
+    }
+    ```
+
+    
+    listpack
+    ====
+    stream项目里基本没用，这个结构就没怎么仔细看了
+
     **************
     
     
