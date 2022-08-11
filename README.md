@@ -802,7 +802,7 @@
     } quicklist;
     ```
     
-    增加的时候先检查能不能插入当前ziplist而不连锁改变prevlen，不可以则新建一个节点
+    增加的时候先检查能不能插入当前ziplistn，不可以则新建一个节点
     数量不满足也会新建，具体逻辑在_quicklistNodeAllowInsert中
     ```c
     int quicklistPushHead(quicklist *quicklist, void *value, size_t sz) {
@@ -820,6 +820,38 @@
         ...
     }
     ```
+    判断能否插入的函数allowInsert，他会计算新插入元素后的大小（new_sz），这个大小等于 quicklistNode 的当前大小（node->sz）、插入元素的大小（sz），以及插入元素后 ziplist 的 prevlen 占用大小
+    然后判断元素个数是不是满足要求,总大小是否满足要求
+
+    ```c
+
+    // 8196
+    #define sizeMeetsSafetyLimit(sz) ((sz) <= SIZE_SAFETY_LIMIT)
+    
+    REDIS_STATIC int _quicklistNodeAllowInsert(const quicklistNode *node,
+                                               const int fill, const size_t sz) {
+        if (unlikely(!node))
+            return 0;
+        // 比较大的节点
+        if (unlikely(QL_NODE_IS_PLAIN(node) || isLargeElement(sz)))
+            return 0;
+        // 检查大小
+        if (likely(_quicklistNodeSizeMeetsOptimizationRequirement(new_sz, fill)))
+            return 1;
+        // 检查大小
+        else if (!sizeMeetsSafetyLimit(new_sz))
+            return 0;
+        // 检查个数
+        else if ((int)node->count < fill)
+            return 1;
+        else
+            return 0;
+    }
+    ```
+
+    另外这里看到redis虽然是内存友好，但是CPU方面也有做很多优化，比如用likely和unlikely进行分支预测
+
+
 
     
     listpack
