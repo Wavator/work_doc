@@ -726,7 +726,7 @@
         unsigned char *p;
     } zlentry;
     ```
-    整个ziplist是<zlbytes> <zltail> <zllen> <entry> <entry> ... <entry> <zlend>
+    整个ziplist是 zlbytes, zltail, zllen, entry, entry ... entry, zlend
     ziplist有一些性能问题，主要看insert函数
 
     ```c
