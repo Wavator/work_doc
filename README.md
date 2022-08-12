@@ -29,6 +29,7 @@
             - [code](#redis-hashtable-code)
         - [ziplist](#ziplist)
         - [quicklist](#quicklist)
+        - [skiplist](#skiplist)
     
 - [性能优化](#性能优化)
     
