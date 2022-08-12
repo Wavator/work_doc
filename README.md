@@ -726,7 +726,7 @@
         unsigned char *p;
     } zlentry;
     ```
-    整个ziplist是 zlbytes, zltail, zllen, entry, entry ... entry, zlend
+    整个ziplist是<zlbytes> <zltail> <zllen> <entry> <entry> ... <entry> <zlend>
     ziplist有一些性能问题，主要看insert函数
 
     ```c
@@ -859,6 +859,72 @@
     listpack
     ====
     stream项目里基本没用，这个结构就没怎么仔细看了
+    
+    
+    skiplist
+    ====
+    
+    skiplist是用来实现有序集合的结构
+    ```c
+    typedef struct zskiplistNode {
+        //Sorted Set中的元素
+        sds ele;
+        //元素权重值
+        double score;
+        //后向指针
+        struct zskiplistNode *backward;
+        //节点的level数组，保存每层上的前向指针和跨度
+        struct zskiplistLevel {
+            struct zskiplistNode *forward;
+            unsigned long span;
+        } level[];
+    } zskiplistNode;
+    
+    typedef struct zskiplist {
+        struct zskiplistNode *header, *tail;
+        unsigned long length;
+        int level;
+    } zskiplist;
+    ```
+    
+    他的基本原理和所有跳表一样，分层使用了随机某个点的层数的设计。
+    ```c
+    zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
+        ...
+        //查询部分，和跳表一样，同级倒着找，span是跨度，通过span计算出跳的rank
+        for (i = zsl->level-1; i >= 0; i--) {
+            /* store rank that is crossed to reach the insert position */
+            rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
+            while (x->level[i].forward &&
+                    (x->level[i].forward->score < score ||
+                        (x->level[i].forward->score == score &&
+                        sdscmp(x->level[i].forward->ele,ele) < 0)))
+            {
+                rank[i] += x->level[i].span;
+                x = x->level[i].forward;
+            }
+            update[i] = x;
+        }
+        // 随机生成新节点建几层索引，32以内，而且每层是0.25概率向上拓展
+        level = zslRandomLevel();
+        if (level > zsl->level) {
+            ...//比当前level大，维护level层到当前层的span（通过上面的update信息）
+        }
+        x = zslCreateNode(level,score,ele);
+        for (i = 0; i < level; i++) {
+            // 维护每一层的span
+        }
+    
+        // level比较低，上层span增加
+        for (i = level; i < zsl->level; i++) {
+            update[i]->level[i].span++;
+        }
+    
+        // 元素个数增加
+        ...
+        return x;
+    }
+    ```
 
     **************
     
