@@ -30,6 +30,9 @@
         - [ziplist](#ziplist)
         - [quicklist](#quicklist)
         - [skiplist](#skiplist)
+    - [redis线程](#redis-multi-thread)
+        - [后台任务线程](#redis-bio)
+        - [reactor](#redis-reactor)
     
 - [性能优化](#性能优化)
     
@@ -926,6 +929,138 @@
         return x;
     }
     ```
+
+    redis-multi-thread
+    ====
+    
+    redis经常被说是单线程模型，但其实这个说法并不正确。通过阅读redis的源码发现，redis其实只是在“处理客户端请求”这一块是单线程的。
+
+    后台来看，redis很早就支持多线程了，通过bio，redis关闭文件，fsync aof日志，lazyfree 字典之类的对象使用的内存，都是通过创建一个bio任务，另起一个线程做的。这里是生产者消费者模型，生产者提交任务，消费者不停轮询这个任务队列
+    
+    这个主要是为了避免耗时的操作影响主线程，比如aof写入磁盘，如果在主线程中，那磁盘操作就成了性能瓶颈，肯定会严重影响redis的效率。
+
+
+    前台来看，redis 在6.0之后（可惜我们项目并没有使用），从单Reactor单线程模式变成了单Reactor多线程模式，用来维护客户端的socket连接。
+
+    redis-bio
+    ====
+
+    后台任务都是通过bio.c建立的，主要是通过`bioSubmitJob` 进行创建，通过`bioProcessBackgroundJobs` 进行消费
+
+    bio init在redis server的`initServer` 之后，可以看到main中的顺序是先`initServer` 再 `initServerLast`，在这个last里调用了`bioInit` ，初始化了后台的任务队列
+
+    bioinit:
+    ```c
+    void bioInit(void) {
+        ...
+        // 根据三种后台任务类型，初始化他的锁和任务列表
+        for (j = 0; j < BIO_NUM_OPS; j++) {
+            pthread_mutex_init(&bio_mutex[j],NULL);
+            pthread_cond_init(&bio_newjob_cond[j],NULL);
+            pthread_cond_init(&bio_step_cond[j],NULL);
+            bio_jobs[j] = listCreate();
+            bio_pending[j] = 0;
+        }
+    
+        // 计算子线程栈空间大小
+        ... 
+    
+        for (j = 0; j < BIO_NUM_OPS; j++) {
+            void *arg = (void*)(unsigned long) j;
+            //调用create创建子线程
+            if (pthread_create(&thread,&attr,bioProcessBackgroundJobs,arg) != 0) {
+                serverLog(LL_WARNING,"Fatal: Can't initialize Background Jobs.");
+                exit(1);
+            }
+            bio_threads[j] = thread;
+        }
+    }
+    ```
+
+    主要就是做了几件准备工作，这里可以看到，他根据BIO_NUM_OPS，每种后台OP，创建一个任务链表，记录等待数量的数组。并且初始化每种任务的锁和两种条件变量。
+
+    计算子线程大小这个是避免在一些系统下栈太小
+
+    再调用pthread_create，创建子线程，并指定函数入口bioProcessBackgroundJobs，arg是他的编号，上面提到的三种后台OP类型
+
+    这里执行完，就起了三个后台任务的消费者，每种消费者消费一种类型的后台任务
+
+
+    bioProcessBackgroundJobs是消费函数，用来真正的处理任务
+    ```c
+        ...//给子线程起个名字之类的操作
+
+
+        // 这里可以看到子线程可以去绑定单独的后台CPU的，当然这个要单独的宏定义USE_SETCPUAFFINITY去生效
+        // 比如在redis.conf里增加bio_cpulist 1,3
+        redisSetCpuAffinity(server.bio_cpulist);
+        makeThreadKillable();
+
+        // 先对线程加锁
+        pthread_mutex_lock(&bio_mutex[type]);
+
+        // 初始化信号屏蔽集合，只处理自己想要的信号
+        sigemptyset(&sigset);
+        sigaddset(&sigset, SIGALRM);
+        if (pthread_sigmask(SIG_BLOCK, &sigset, NULL))
+            serverLog(LL_WARNING,
+                "Warning: can't mask SIGALRM in bio.c thread: %s", strerror(errno));
+
+        while(1) {
+            listNode *ln;
+
+            // 这边注册一个条件变量,等待被后台任务，上面先锁定了，进来对时候总是先进入阻塞等待, 有newjob的时候会唤醒
+            if (listLength(bio_jobs[type]) == 0) {
+                pthread_cond_wait(&bio_newjob_cond[type],&bio_mutex[type]);
+                continue;
+            }
+
+            // 拿出一个任务, 给线程解锁
+            ln = listFirst(bio_jobs[type]);
+            job = ln->value;
+            pthread_mutex_unlock(&bio_mutex[type]);
+
+            //每种任务类型的执行函数写在这里
+            // 省略三个ifelse
+            ...
+
+            //释放任务本身
+            zfree(job);
+
+            // 锁上，给完成数量-1，列表node-1
+            pthread_mutex_lock(&bio_mutex[type]);
+            listDelNode(bio_jobs[type],ln);
+            bio_pending[type]--;
+            // step_cond唤醒
+            pthread_cond_broadcast(&bio_step_cond[type]);
+        }
+    ```
+
+    step_cond只是被设计出来，源码里还没找到在哪用过，应该是没有用过的。
+
+    所以这个逻辑就变成了，线程cond_wait这个newjob类型的条件量，有的话拿出来根据job的类型处理一下
+
+    这里是提交job的时候
+    ```c
+        void bioSubmitJob(int type, bio_job *job) {
+            pthread_mutex_lock(&bio_mutex[type]);
+            listAddNodeTail(bio_jobs[type],job);
+            bio_pending[type]++;
+            // 这里创建完job，唤醒newjob的cond_wait
+            pthread_cond_signal(&bio_newjob_cond[type]);
+            pthread_mutex_unlock(&bio_mutex[type]);
+        }
+    ```
+
+    所有后台任务都是通过调用这个submitjob接口创建的，创建之后会唤醒对应type的后台线程，异步的处理上面说的三种工作
+
+    redis后台任务线程用了大量的锁操作，对这块并不熟悉，看起来有点吃力。但是忽略锁的操作，就是比较简单的工作模式了。
+
+    redis-reactor
+    ====
+    
+    redis的reactor模式在6.0版本前后有所不同，我们项目是redis是5.x的版本，所以用不上6.0以后的io特性
+
 
     **************
     
