@@ -1072,6 +1072,10 @@
 
     但本质上都还是io多路复用，看下redis里面的事件循环EventLoop
 
+    注意只有io多路复用在6.0之后是多线程Reactor模式，io拿进输入区缓存之后是顺序执行的，还是只有一个线程在处理客户端请求
+
+    不是说有若干个handler在处理客户端请求，只是写入缓冲区而已。
+
     - 事件的定义
 
     redis中有IO事件和时间事件两种基本事件，对应了aeFileEvent和aeTimeEvent，在ae.h中，看一下aeFileEvent
