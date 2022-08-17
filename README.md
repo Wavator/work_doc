@@ -4,6 +4,9 @@
 >> 线上事故记录和优化按月记录
 >> 学习记录放在最外面这个README里
 >> 这个也就当日记看看，不会系统的讲一些东西
+
+不定期开新坑+补充
+
 - [OpenResty](#OpenResty)
     - [LuaJit](#luajit)
         - [测试代码](#test)
@@ -1060,6 +1063,293 @@
     ====
     
     redis的reactor模式在6.0版本前后有所不同，我们项目是redis是5.x的版本，所以用不上6.0以后的io特性
+
+    [reactor的教材放一下](https://gee.cs.oswego.edu/dl/cpjslides/nio.pdf)
+
+    6.0之前，redis是单Reactor单线程模式，也就是accept->read->handler->write
+
+    6.0之后，redis是单Reactor多线程模式，也就是handler扔到了别的线程
+
+    但本质上都还是io多路复用，看下redis里面的事件循环EventLoop
+
+    - 事件的定义
+
+    redis中有IO事件和时间事件两种基本事件，对应了aeFileEvent和aeTimeEvent，在ae.h中，看一下aeFileEvent
+
+    ```c
+    typedef struct aeFileEvent {
+        int mask; /* one of AE_(READABLE|WRITABLE|BARRIER) */
+        aeFileProc *rfileProc;
+        aeFileProc *wfileProc;
+        void *clientData;
+    } aeFileEvent;
+    ```
+
+    mask是用来区分哪一种FileEvent， timeEvent则是使用id来进行区分
+
+    这里看到mask是AE_(READABLE|WRITABLE|BARRIER)这三种事件，可读，可写，和反转读写事件（不知道这么翻译是否有失准确）
+
+    可读，可写，是客户端连过来socket的状态，和正常socket的可读可写没有区别
+
+    主要看看这个AE_BARRIER，这个类型的事件会先写再读，不带这个mask则是先读再写
+
+    这个在networking.c（和客户端交互部分）有
+    ```c
+    if (server.aof_state == AOF_ON &&
+        server.aof_fsync == AOF_FSYNC_ALWAYS)
+    {
+        ae_barrier = 1;
+    }
+    ```
+
+    可以看到，AOF在写的时候，redis出于希望数据快速落盘的考虑，会启用这个标志，这样就是先写数据库，再写socket，这个后续会写一下事件循环的细节，这里继续介绍event结构
+
+    aeFileProc类型的两个回调函数分别对应了读和写，在事件循环里拿到读事件调用读的回调，写调写的
+
+    clientData很好理解，他指向客户端的私有数据
+
+    - 事件循环主循环
+
+    这部分代码在aeMain中，他长得就像这样
+
+    ```c
+    void aeMain(aeEventLoop *eventLoop) {
+        eventLoop->stop = 0;
+        while (!eventLoop->stop) {
+            …
+            aeProcessEvents(eventLoop, AE_ALL_EVENTS|AE_CALL_AFTER_SLEEP);
+        }
+    }
+    ```
+
+    调用的时候是
+
+    ```c
+    int main()
+    {
+        ...
+        // 这边直接起一个aeMain，相当于main函数这里开一个死循环
+        aeMain(server.el)
+        // 执行到下面说明redis实例进入关闭状态
+        aeDeleteEventLoop(server.el);
+        return 0;
+    }
+    ```
+
+    这个是main函数最下面几行，可以看到，aeMain是redis server全部准备就绪之后，直接起起来的，整个redis的核心也就是这个事件循环，它在主线程里面阻塞，不断的调用
+    aeProcessEvent，处理事件循环中的事件
+
+    这里已经调用aeMain进行事件循环了，准备工作在initServer中`server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);`,这里要分配内存空间，创建多路复用的实例,把多路复用实例的引用存到事件循环实例中。
+
+
+
+    redis的主循环就是这个事件循环，接下来看看事件循环的每一步
+
+    - 单步的事件循环
+
+    ```c
+    //flag用来判断执行哪种事件
+    int aeProcessEvents(aeEventLoop *eventLoop, int flags)
+    {
+        int processed = 0, numevents;
+
+        // 没有可以执行的
+        if (!(flags & AE_TIME_EVENTS) && !(flags & AE_FILE_EVENTS)) return 0;
+    
+        if (eventLoop->maxfd != -1 ||
+            ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {
+            int j;
+            struct timeval tv, *tvp;
+    
+            /*先执行before sleep，主线程先去等待多路复用api的返回之前先做一些其他工作，例如aof写入磁盘*/
+            if (eventLoop->beforesleep != NULL && flags & AE_CALL_BEFORE_SLEEP)
+                eventLoop->beforesleep(eventLoop);
+    
+            // 多路复用api拿到当前就绪了几个事件
+            numevents = aeApiPoll(eventLoop, tvp);
+    
+            /*多路复用拿到可以执行的事件之后，要做一些准备工作*/
+            if (eventLoop->aftersleep != NULL && flags & AE_CALL_AFTER_SLEEP)
+                eventLoop->aftersleep(eventLoop);
+    
+            for (j = 0; j < numevents; j++) {
+                int fd = eventLoop->fired[j].fd;
+                aeFileEvent *fe = &eventLoop->events[fd];
+                int mask = eventLoop->fired[j].mask;
+                int fired = 0;
+    
+                // 这里是上面说的那种barrier类型，也就是AOF fsync开启的时候，命令进来会先落盘
+                int invert = fe->mask & AE_BARRIER;
+    
+                // 下面根据是否barrier，调用rfileProc和wfileProc
+                if (!invert && fe->mask & mask & AE_READABLE) {
+                    fe->rfileProc(eventLoop,fd,fe->clientData,mask);
+                    fired++;
+                    fe = &eventLoop->events[fd];
+                }
+    
+                if (fe->mask & mask & AE_WRITABLE) {
+                    if (!fired || fe->wfileProc != fe->rfileProc) {
+                        fe->wfileProc(eventLoop,fd,fe->clientData,mask);
+                        fired++;
+                    }
+                }
+    
+                if (invert) {
+                    fe = &eventLoop->events[fd]; /* Refresh in case of resize. */
+                    if ((fe->mask & mask & AE_READABLE) &&
+                        (!fired || fe->wfileProc != fe->rfileProc))
+                    {
+                        fe->rfileProc(eventLoop,fd,fe->clientData,mask);
+                        fired++;
+                    }
+                }
+                processed++;
+            }
+        }
+        // 处理时间类型的事件, 下面再说
+        if (flags & AE_TIME_EVENTS)
+            processed += processTimeEvents(eventLoop);
+    
+        return processed;
+    }
+    ```
+
+    整个流程大概是这样的，就是调用多路复用api，获取就绪的文件事件，执行，再处理TimeEvents。下面分别介绍一下两种事件的定义，注册，执行
+
+    - IO事件
+
+    创建: 主要是在事件循环和多路复用api中分别注册，并绑定对应的回调函数和数据
+
+    ```c
+    int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask, aeFileProc *proc, void *clientData){
+        //根据文件描述符，尝试新建/取出一个io事件，并注册到多路复用api
+        aeFileEvent *fe = &eventLoop->events[fd];
+        if (aeApiAddEvent(eventLoop, fd, mask) == -1)
+            return AE_ERR;
+        // 根据mask类型，绑定回调函数
+        fe->mask |= mask;
+        if (mask & AE_READABLE) fe->rfileProc = proc;
+        if (mask & AE_WRITABLE) fe->wfileProc = proc;
+        // 设置数据, 更新事件循环里的最大文件描述符
+        fe->clientData = clientData;
+        if (fd > eventLoop->maxfd)
+            eventLoop->maxfd = fd;
+    }
+    ```
+
+    在redis initServer阶段，他会注册TCP连接的IO事件，并绑定对应回调函数为`acceptTcpHandler`
+
+    `createSocketAcceptHandler(&server.ipfd, acceptTcpHandler) `
+
+    ```c
+    int createSocketAcceptHandler(socketFds *sfd, aeFileProc *accept_handler) {
+        int j;
+        for (j = 0; j < sfd->count; j++) {
+            if (aeCreateFileEvent(server.el, sfd->fd[j], AE_READABLE, accept_handler,NULL) == AE_ERR) {
+                // 创建失败回滚
+                for (j = j-1; j >= 0; j--) aeDeleteFileEvent(server.el, sfd->fd[j], AE_READABLE);
+                return C_ERR;
+            }
+        }
+        return C_OK;
+    }
+    ```
+
+    这样在起server的时候，就确定了处理TCP IO事件的回调函数，同样也会注册其他模块的回调函数。
+
+    这个回调函数是绑定到redis的监听端口ipfd的，也就是客户端的连接请求都会走这个accectTcpHandler回调, 对应了Reactor模式的accepter
+
+    ```c
+    void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
+        ...
+
+        while(max--) {
+            //试图创建一个socket连接，返回这个连接的socket文件描述符
+            cfd = anetTcpAccept(server.neterr, fd, cip, sizeof(cip), &cport);
+            if (cfd == ANET_ERR) {
+                return;
+            }
+            //先调用conn，建立连接
+            //再把已连接socket传入accectCommonHandler
+            acceptCommonHandler(connCreateAcceptedSocket(cfd),0,cip);
+        }
+    }
+
+    static void acceptCommonHandler(connection *conn, int flags, char *ip) {
+        ... 
+        ...
+        //检查能不能连接
+        if (listLength(server.clients) + getClusterConnectionsCount()
+            >= server.maxclients)
+        {
+            ...
+            return;
+        }
+    
+        //根据socket连接创建一个客户端
+        if ((c = createClient(conn)) == NULL) {
+            connClose(conn);
+            return;
+        }
+    
+        //最终确定接受这个客户端连接
+        if (connAccept(conn, clientAcceptHandler) == C_ERR) {
+            ...
+            return;
+        }
+    }
+
+    ```
+
+    这里面有个重要的函数createClient，里面主要是
+    ```c
+        connEnableTcpNoDelay(conn);
+        if (server.tcpkeepalive)
+            connKeepAlive(conn,server.tcpkeepalive);
+        connSetReadHandler(conn, readQueryFromClient);
+        connSetPrivateData(conn, c);
+    ```
+
+    这里的connEnableTcpNoDelay(conn);允许了TCP小包发送
+    connKeepAlive维护长连接
+    connSetReadHandler相当于把读的回调绑定给了这个`readQueryFromClient`函数
+    connSetPrivateData保存这个连接的数据
+
+    所以看到了这里，IO读事件的回调，就是这个`readQueryFromClient`
+    它主要是把指令读到缓冲区buffer中
+
+    `readQueryFromClient` -> `processInputBufferAndReplicate` -> `processInputBuffer` -> `processCommand` -> `addApply`
+
+    这个缓冲区，会被前面提到的beforeSleep通过调用`handleClientsWithPendingWrites`写回客户端，他一样会调用aeCreateFileEvent，但他创建的是一个可写事件
+
+    相当于客户端过来可读，回去可写。可读可写都是基于redis机器而言的。
+
+    这样一个请求进来的时候，完整的有
+    建立连接 -> 调用accecpt函数，注册到事件循环并绑定事件循环的回调readQueryFromClient -----> 客户端数据来了调用回调函数写入缓冲区 -> 处理逻辑 -> 写到缓冲区，标记连接socket为可写
+
+
+    - 时间事件
+
+    这个内容少一些，类比上面，initServer的时候他一样注册了
+    `aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL)`
+
+    他就是每个周期都会执行的定时任务，里面主要是这几个
+
+    ```c
+    // 检查是不是关闭
+    if (server.shutdown_asap) { if (prepareForShutdown(SHUTDOWN_NOFLAGS) == C_OK) exit(0); ... }
+    // 客户端异步操作
+    clientCron();
+    // 后台操作，比如删除过期key之类的
+    databaseCron();
+    ```
+
+    上面aeProcessEvents里面讲了每次循环都会检查时间列表有没有可以执行的时间事件，拿出来执行一下。
+
+    注意这个时间事件都是在主线程执行的（因为是aeMain的循环里每一步都会调用）
+
+    所以删除key(对应databasecron里面的activeExpireCycle)等操作是可能阻塞主线程的操作
 
 
     **************
