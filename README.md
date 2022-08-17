@@ -1330,6 +1330,9 @@
     这样一个请求进来的时候，完整的有
     建立连接 -> 调用accecpt函数，注册到事件循环并绑定事件循环的回调readQueryFromClient -----> 客户端数据来了调用回调函数写入缓冲区 -> 处理逻辑 -> 写到缓冲区，标记连接socket为可写
 
+    这样redis就把客户端输入用多路复用的方式高效的拿到了缓冲区并处理，如果操作比较慢，有命令卡在缓冲区，那么beforeSleep的时候会调用
+    `processUnblockedClients`, 这个最终会调用`processCommand`拿出缓冲区的指令并处理
+
 
     - 时间事件
 
