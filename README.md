@@ -34,6 +34,9 @@
     - [redis线程](#redis-multi-thread)
         - [后台任务线程](#redis-bio)
         - [reactor](#redis-reactor)
+    - [redis持久化数据](#redis-persist-datas)
+        - [RDB](#redis-rdb)
+        - [AOF](#redis-aof)
     
 - [性能优化](#性能优化)
     
@@ -1355,6 +1358,363 @@
     注意这个时间事件都是在主线程执行的（因为是aeMain的循环里每一步都会调用）
 
     所以删除key(对应databasecron里面的activeExpireCycle)等操作是可能阻塞主线程的操作
+
+    redis-persist-datas
+    ====
+
+    redis 有rdb和aof两种方式持久化数据，rdb是类似于生成快照的方式，aof则是基于指令
+
+    目前项目里是aof的方式，策略是everysec，每天11点重写aof
+
+    redis-rdb
+    ====
+
+    redis-aof
+    ====
+
+    - aof写入
+
+    aof 如果开启，流程就分为三步，首先看processCommand最终调用到的call函数
+    void call(client *c, int flags) {
+        uint64_t client_old_flags = c->flags;
+        struct redisCommand *real_cmd = c->realcmd;
+    
+        ...
+        //预备工作->处理逻辑
+        c->cmd->proc(c);
+        c->duration = duration;
+        //处理完之后的一些逻辑
+        ...
+        afterCommand(c);
+        ...
+    }
+
+    void afterCommand(client *c) {
+        UNUSED(c);
+        if (!server.in_nested_call) {
+            // 判断有没有持久化策略
+            if (server.core_propagates)
+                propagatePendingCommands();
+            trackingHandlePendingKeyInvalidations();
+        }
+    }
+
+    void propagatePendingCommands() {
+        ...
+        调用propagateNow
+    }
+
+    static void propagateNow(int dbid, robj **argv, int argc, int target) {
+        if (!shouldPropagate(target))
+            return;
+        // 写入AOF
+        if (server.aof_state != AOF_OFF && target & PROPAGATE_AOF)
+            feedAppendOnlyFile(dbid,argv,argc);
+        if (target & PROPAGATE_REPL)
+            replicationFeedSlaves(server.slaves,dbid,argv,argc);
+    }
+    ```
+
+    所以指令正常运行结束后，redis会根据配置，最终调用feedAppendOnlyFile进行AOF文件的写入server.aof_buf
+
+    最后serverCron会调用flushAppendOnlyFile，尝试真的写入aof文件（always直接写入，everysec会判断时间是否满足）
+
+    flushAppendOnlyFile如果判断需要同步aof文件，会走到try_fsync分支，主要看这个分支
+
+    ```c
+    try_fsync:
+        if (server.aof_no_fsync_on_rewrite && hasActiveChildProcess())
+            return;
+    
+        if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
+            latencyStartMonitor(latency);
+            latencyEndMonitor(latency);
+            latencyAddSampleIfNeeded("aof-fsync-always",latency);
+            server.aof_fsync_offset = server.aof_current_size;
+            server.aof_last_fsync = server.unixtime;
+        } else if ((server.aof_fsync == AOF_FSYNC_EVERYSEC &&
+                    server.unixtime > server.aof_last_fsync)) {
+            if (!sync_in_progress) {
+                // every_sec的时候起后台线程做fsync
+                aof_background_fsync(server.aof_fd);
+                server.aof_fsync_offset = server.aof_current_size;
+            }
+            server.aof_last_fsync = server.unixtime;
+    }
+    ```
+
+    ALWAYS的分支说明开了always每次都会真的落盘，所以这个是不开的，不然还不如直接用mysql，EVERY_SEC起后台线程，会用上面的bio做，提交一个bio的task，异步写入aof文件
+
+    注意aof是先操作，再写aof，这个应该是为了避免用aof恢复数据或重写的时候拿出错误的指令
+
+    - aof 重写
+
+    aof一条条的插入，就会太大，所以需要定时重写，比如
+    sadd lunlun gay
+    sadd lunlun gaygay
+
+    可以重写成
+    sadd lunlun gay gaygay
+
+    1. aof什么时候会重写
+
+    aof的重写，最终都是调用rewriteAppendOnlyFileBackground实现的，这个函数里会执行fork等一系列操作。
+
+    一共4个地方调用了这个函数
+
+        - serverCron中，如果满足`if (!hasActiveChildProcess() && server.aof_rewrite_scheduled && !aofRewriteLimited())`, 则会执行。也就是有人设置了他到定时检查的任务里，这里就是说，如果aof重写命令来了，但是还有子进程在运行之类的，比如rdb在生成或者adb在重写，那就会等，设置一个flag，能执行了就立刻执行了
+
+        - serverCron中，如果aof文件增长超过设定值，也会触发被动重写
+            ```c
+                if (server.aof_state == AOF_ON &&
+                    !hasActiveChildProcess() &&
+                    server.aof_rewrite_perc &&
+                    server.aof_current_size > server.aof_rewrite_min_size)
+                {
+                    long long base = server.aof_rewrite_base_size ?
+                        server.aof_rewrite_base_size : 1;
+                    long long growth = (server.aof_current_size*100/base) - 100;
+                    if (growth >= server.aof_rewrite_perc && !aofRewriteLimited()) {
+                        serverLog(LL_NOTICE,"Starting automatic rewriting of AOF on %lld%% growth",growth);
+                        rewriteAppendOnlyFileBackground();
+                    }
+                }
+            ```
+
+        - startAppendOnly函数，也就是通过config把appendOnly配置进去，这个从关闭到打开的瞬间会立刻触发重写或者加入调度队列, 或者restartAOFAfterSYNC，它会在主从节点的复制过程中被调用
+
+        - bgrewriteaofCommand，用户手动调用，如果满足条件（没有子进程, aof开启等）会立刻重写或者加入调度队列
+
+    2. aof 重写的时候有哪些操作
+
+    aof重写最终都会调用rewriteAppendOnlyFileBackground函数
+
+    ```c
+    int rewriteAppendOnlyFileBackground(void) {
+        ...
+        //保证数据最新
+        flushAppendOnlyFile(1);
+        // 创建子进程redisFork其实就是fork+记录一些全局数据，比如正在进行的子进程类型之类的
+        if ((childpid = redisFork(CHILD_TYPE_AOF)) == 0) {
+            ...
+            //绑定CPU开始重写
+            redisSetCpuAffinity(server.aof_rewrite_cpulist);
+            if (rewriteAppendOnlyFile(tmpfile) == C_OK) {
+                sendChildCowInfo(CHILD_INFO_TYPE_AOF_COW_SIZE, "AOF rewrite");
+                exitFromChild(0);
+            } else {
+                exitFromChild(1);
+            }
+        } else {
+            serverLog(LL_NOTICE,
+                "Background append only file rewriting started by pid %ld",(long) childpid);
+            server.aof_rewrite_scheduled = 0;
+            server.aof_rewrite_time_start = time(NULL);
+            return C_OK;
+        }
+        return C_OK; /* unreached */
+    }
+    ```
+
+    可以看到他创建了子进程之后，子进程调用rewriteAppendOnlyFile，开始真正的重写。父进程则重置重写任务的状态，并记录一个开始时间
+
+    rewriteAppendOnlyFile会调用rewriteAppendOnlyFileRio，执行真正的重写逻辑.
+    ```c
+    int rewriteAppendOnlyFileRio(rio *aof) {
+        ...
+        //对于每个db，先写一个select进去
+        for (j = 0; j < server.dbnum; j++) {
+            char selectcmd[] = "*2\r\n$6\r\nSELECT\r\n";
+            redisDb *db = server.db+j;
+            dict *d = db->dict;
+            if (dictSize(d) == 0) continue;
+            di = dictGetSafeIterator(d);
+            if (rioWrite(aof,selectcmd,sizeof(selectcmd)-1) == 0) goto werr;
+            if (rioWriteBulkLongLong(aof,j) == 0) goto werr;
+            //迭代db的hashmap， 按照类型分别写入
+            //按照key，在expiremap获取过期时间，也写入
+            while((de = dictNext(di)) != NULL) {
+                keystr = dictGetKey(de);
+                o = dictGetVal(de);
+                expiretime = getExpire(db,&key);
+                if (o->type == OBJ_STRING) {
+                    // string类型这样三步，先写入set，再写key名，再写value
+                    char cmd[]="*3\r\n$3\r\nSET\r\n";
+                    if (rioWrite(aof,cmd,sizeof(cmd)-1) == 0) goto werr;
+                    if (rioWriteBulkObject(aof,&key) == 0) goto werr;
+                    if (rioWriteBulkObject(aof,o) == 0) goto werr;
+                } else if (o->type == OBJ_LIST) {
+                    if (rewriteListObject(aof,&key,o) == 0) goto werr;
+                } else if (o->type == OBJ_SET) {
+                    if (rewriteSetObject(aof,&key,o) == 0) goto werr;
+                } else if (o->type == OBJ_ZSET) {
+                    if (rewriteSortedSetObject(aof,&key,o) == 0) goto werr;
+                } else if (o->type == OBJ_HASH) {
+                    if (rewriteHashObject(aof,&key,o) == 0) goto werr;
+                } else if (o->type == OBJ_STREAM) {
+                    if (rewriteStreamObject(aof,&key,o) == 0) goto werr;
+                } else if (o->type == OBJ_MODULE) {
+                    if (rewriteModuleObject(aof,&key,o,j) == 0) goto werr;
+                } else {
+                    serverPanic("Unknown object type");
+                }
+    
+                // 如果是子进程，那就把这个value的内存释放, 一方面减少内存使用，另一方面减少写时复制导致的物理内存占用增长
+                size_t dump_size = aof->processed_bytes - aof_bytes_before_key;
+                if (server.in_fork_child) dismissObject(o, dump_size);
+    
+                // 写入这个key的过期时间，expeirat key time
+                if (expiretime != -1) {
+                    char cmd[]="*3\r\n$9\r\nPEXPIREAT\r\n";
+                    if (rioWrite(aof,cmd,sizeof(cmd)-1) == 0) goto werr;
+                    if (rioWriteBulkObject(aof,&key) == 0) goto werr;
+                    if (rioWriteBulkLongLong(aof,expiretime) == 0) goto werr;
+                }
+                ...
+            }
+            dictReleaseIterator(di);
+            di = NULL;
+        }
+        //处理写入错误
+    werr:
+        ...
+    }
+    ```
+
+    redis给每个数据类型，都指定了一个写入的方案。以list为例：
+
+    ```c
+    int rewriteListObject(rio *r, robj *key, robj *o) {
+        long long count = 0, items = listTypeLength(o);
+    
+        // 分类讨论这种数据结构对应的底层编码，list只有这一种
+        if (o->encoding == OBJ_ENCODING_QUICKLIST) {
+            quicklist *list = o->ptr;
+            quicklistIter *li = quicklistGetIterator(list, AL_START_HEAD);
+            quicklistEntry entry;
+    
+            while (quicklistNext(li,&entry)) {
+                //先写一个rpush key
+                if (count == 0) {
+                    //计算这次指令的数量，最长不能超过设定值，最短是当前list还剩的大小
+                    int cmd_items = (items > AOF_REWRITE_ITEMS_PER_CMD) ?
+                        AOF_REWRITE_ITEMS_PER_CMD : items;
+                    if (!rioWriteBulkCount(r,'*',2+cmd_items) ||
+                        !rioWriteBulkString(r,"RPUSH",5) ||
+                        !rioWriteBulkObject(r,key)) 
+                    {
+                        quicklistReleaseIterator(li);
+                        return 0;
+                    }
+                }
+    
+                // 再写一堆value
+                if (entry.value) {
+                    if (!rioWriteBulkString(r,(char*)entry.value,entry.sz)) {
+                        quicklistReleaseIterator(li);
+                        return 0;
+                    }
+                } else {
+                    if (!rioWriteBulkLongLong(r,entry.longval)) {
+                        quicklistReleaseIterator(li);
+                        return 0;
+                    }
+                }
+                // 如果超出上限，count重置，也就是分到下一条里，下一条继续rpush开头。避免单条太长
+                if (++count == AOF_REWRITE_ITEMS_PER_CMD) count = 0;
+                items--;
+            }
+            quicklistReleaseIterator(li);
+        } else {
+            serverPanic("Unknown list encoding");
+        }
+        return 1;
+    }
+    ```
+
+    可以看到实际的重写，分为几步，先讨论编码，再根据编码把多条命令整合成一条。
+
+    如果一条命令太长，则会拆分成多条。
+
+    为什么拆分成多条呢，原因是redis启动的时候，如果要根据aof恢复数据，他的做法是创建一个假的客户端写入，那他走客户端写入，就要走缓冲区那一套逻辑，指令太长会缓冲区过大.
+
+
+    3. 重写的时候和父进程交互
+
+    - 7.0 之前：
+    aof重写和父进程的交互有这么几个地方
+
+    第一，aof重写是一个后台进程，那redis父进程肯定还是要处理客户端请求的，这样就面临一个问题，重写要进行一段时间，这段时间还会把这段时间的指令appendAof
+
+    那你新的aof重写完，必然要回来替换原本的aof文件，重写这段时间的aof肯定不能让他丢失，在7.0之前redis启用multiAOF这个设计之前，父进程都要想办法把这段时间的aof数据发给子进程，让子进程也写入aof
+
+    这里就需要子进程和父进程交互，父进程通过一定的机制把缓存的指令发送给子进程
+
+    第二，aof重写结束后，怎么告诉父进程他已经ok了
+
+    第三，父进程要通知子进程他收到了，可以清理一些资源了。
+
+    redis为了实现这几种父子进程通信，采用了创建了管道的方法进行父子进程通信
+
+    每次调用rewriteAppendOnlyFileBackground，实际上会调用redisFork方法
+
+    ```c
+    int redisFork() {
+        ...
+         openChildInfoPipe();
+         int childpid
+         if ((childpid == fork()) == 0){
+            ...
+         } else {
+            ...
+         }
+    }
+    ```
+    openChildInfoPipe实际上就建立了一个管道，他会调用`anetPipe(server.child_info_pipe, O_NONBLOCK, 0)`，最终调用pipe去创建管道。
+
+    anetpipe创建管道并标记是写还是读，并且根据传入的O_NONBLOCK，把管道设置为非阻塞
+    ```c
+    int anetPipe(int fds[2], int read_flags, int write_flags) {
+        int pipe_flags = 0;
+        if (pipe_flags == 0 && pipe(fds))
+            return -1;
+        if (read_flags & O_CLOEXEC)
+            if (fcntl(fds[0], F_SETFD, FD_CLOEXEC))
+                goto error;
+        if (write_flags & O_CLOEXEC)
+            if (fcntl(fds[1], F_SETFD, FD_CLOEXEC))
+                goto error;
+        read_flags &= ~O_CLOEXEC;
+        if (read_flags)
+            if (fcntl(fds[0], F_SETFL, read_flags))
+                goto error;
+        write_flags &= ~O_CLOEXEC;
+        if (write_flags)
+            if (fcntl(fds[1], F_SETFL, write_flags))
+                goto error;
+        return 0;
+    
+    error:
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    ```
+
+    子进程aof重写完之后，会给父进程发送`write(server.aof_pipe_write_ack_to_parent,"!",1)`，让父进程停止重写。
+
+    - 7.0之后
+
+    在serverCron里轮询，每次调用checkChildrenDone，里面调用waitpid，判断子进程是否完成，完成了调用backgroundRewriteDoneHandler更新manifest和进行其他清理工作。
+
+
+    4. 重写时，新aof缓冲区的更新策略
+
+    在相当一段时间里，redis重写的时候都是用一个无名管道进行父子进程通信，父进程循环把新增的aof写入，子进程rewrite的时候读取到管道里的信息则取出，写入到新aof中
+
+    7.0的版本里，redis提出了Multi Part AOF(MP-AOF)，接下来分别分析两种方式（因为我们项目是5.x版本的redis，是上面那种，但是新的这种有很大优点，需要对比学习）
+
+    - 老rewrite的写入工作流程：
 
 
     **************
