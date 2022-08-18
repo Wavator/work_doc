@@ -1375,6 +1375,7 @@
     - aof写入
 
     aof 如果开启，流程就分为三步，首先看processCommand最终调用到的call函数
+    ```c
     void call(client *c, int flags) {
         uint64_t client_old_flags = c->flags;
         struct redisCommand *real_cmd = c->realcmd;
