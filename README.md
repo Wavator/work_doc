@@ -1792,6 +1792,124 @@
 
     到这里相互确认完，老版本的aof重写就完全完成了
 
+    - 7.0 之后的manifest管理（Multi Part AOF）
+
+    主要是有三种AOF版本，base，incr，history
+
+    重写的时候新的指令是往新incr写的，重写的base替换以前的，以前的base和所有incr命名成history，最终被清理
+
+    保留的是新base和新base rewrite期间写的incr
+
+    用aof重构的时候是base->incr1->incr...->incrn
+
+    也去偷了一张图
+
+
+    ![](assets/16608906119529.jpg)
+
+    流程和上面描述的基本一致。
+
+    `feedAppendOnlyFile`中已经没有了对是否有正在进行的子进程的判断，因为现在是共用一个buf
+
+    往哪个aof写入，则是靠`server.aof_fd`这个全局的文件描述符区分的
+
+    ```c
+    void flushAppendOnlyFile(...){
+        nwritten = aofWrite(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
+    }
+    ```
+
+    rewriteBackground的时候，调用`openNewIncrAofForAppend`
+    
+    这个函数创建一个新的aof文件，这个函数会检查当前的AOF重写状态
+
+    ```c
+    int rewriteAppendOnlyFileBackground(void) {
+        pid_t childpid;
+    
+        if (hasActiveChildProcess()) return C_ERR;
+        ...
+        server.aof_selected_db = -1;
+        flushAppendOnlyFile(1);
+        if (openNewIncrAofForAppend() != C_OK) {
+            server.aof_lastbgrewrite_status = C_ERR;
+            return C_ERR;
+        }
+    }
+    
+    int openNewIncrAofForAppend(void) {
+        serverAssert(server.aof_manifest != NULL);
+        int newfd = -1;
+        aofManifest *temp_am = NULL;
+        sds new_aof_name = NULL;
+    
+        /* Only open new INCR AOF when AOF enabled. */
+        if (server.aof_state == AOF_OFF) return C_OK;
+    
+        /* Open new AOF. */
+        if (server.aof_state == AOF_WAIT_REWRITE) {
+            /* Use a temporary INCR AOF file to accumulate data during AOF_WAIT_REWRITE. */
+            new_aof_name = getTempIncrAofName();
+        } else {
+            /* Dup a temp aof_manifest to modify. */
+            temp_am = aofManifestDup(server.aof_manifest);
+            new_aof_name = sdsdup(getNewIncrAofName(temp_am));
+        }
+        sds new_aof_filepath = makePath(server.aof_dirname, new_aof_name);
+        newfd = open(new_aof_filepath, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+        sdsfree(new_aof_filepath);
+        if (newfd == -1) {
+            serverLog(LL_WARNING, "Can't open the append-only file %s: %s",
+                new_aof_name, strerror(errno));
+            goto cleanup;
+        }
+    
+        if (temp_am) {
+            /* Persist AOF Manifest. */
+            if (persistAofManifest(temp_am) == C_ERR) {
+                goto cleanup;
+            }
+        }
+    
+        serverLog(LL_NOTICE, "Creating AOF incr file %s on background rewrite",
+                new_aof_name);
+        sdsfree(new_aof_name);
+    
+        /* If reaches here, we can safely modify the `server.aof_manifest`
+         * and `server.aof_fd`. */
+    
+        /* fsync and close old aof_fd if needed. In fsync everysec it's ok to delay
+         * the fsync as long as we grantee it happens, and in fsync always the file
+         * is already synced at this point so fsync doesn't matter. */
+        if (server.aof_fd != -1) {
+            aof_background_fsync_and_close(server.aof_fd);
+            server.aof_fsync_offset = server.aof_current_size;
+            server.aof_last_fsync = server.unixtime;
+        }
+        server.aof_fd = newfd;
+    
+        /* Reset the aof_last_incr_size. */
+        server.aof_last_incr_size = 0;
+        /* Update `server.aof_manifest`. */
+        if (temp_am) aofManifestFreeAndUpdate(temp_am);
+        return C_OK;
+    
+    cleanup:
+        if (new_aof_name) sdsfree(new_aof_name);
+        if (newfd != -1) close(newfd);
+        if (temp_am) aofManifestFree(temp_am);
+        return C_ERR;
+    }
+    ```
+
+    这块看的并不细，因为项目里暂时还没用到。但是原理大概是这样的。
+
+    最终还是rewriteDone函数中，替换文件，更新manifest状态
+
+    这样做的好处
+        - 内存节约，省去了aof_rewrite_buf 这个结构，重写的时候没有使用多余的内存
+        - 节约CPU资源，老版本相当于写两份，他写一份。不用往管道里写入，也节约了一些磁盘IO
+
     **************
     
     
