@@ -1715,8 +1715,82 @@
 
     7.0的版本里，redis提出了Multi Part AOF(MP-AOF)，接下来分别分析两种方式（因为我们项目是5.x版本的redis，是上面那种，但是新的这种有很大优点，需要对比学习）
 
-    - 老rewrite的写入工作流程：
+    - 老rewrite的aof写入工作流程：
+        
+        从父进程调用`fork()`开始，redis-server中就会存在两份缓存数据，从[51cto](https://www.51cto.com/article/701106.html)找了一张图直观的表明这个流程
+        ![](assets/16608126761345.jpg)
+    
+    也就是他会同事存在一个aof_rewrite_buf和aof_buf，aof_rewrite_buf的内容会被写入管道和子进程通信（写入子进程要写的那个aof文件）。
+    
+    子进程aof写完之后，子进程发给父进程一个信号，父进程把子进程写的aof文件原子替换掉自己的，完成整个过程。
 
+    大致流程是这样的，看看代码。fork的部分基本一样，但是他是有个6长度的数组，也就是3个管道，标记为非阻塞，并调用aeCreateFileEvent，加入可读事件
+    ```c
+    int aofCreatePipes(void) {
+        …
+        if (anetNonBlock(NULL,fds[0]) != ANET_OK) goto error;
+        if (anetNonBlock(NULL,fds[1]) != ANET_OK) goto error;
+        if (aeCreateFileEvent(server.el, fds[2], AE_READABLE, aofChildPipeReadable, NULL) == AE_ERR) goto error;
+        …
+    }
+    ```
+
+    而后全局保存这些管道
+    ```c
+    int aofCreatePipes(void) {
+        …
+        // 父进程向子进程发送data
+        server.aof_pipe_write_data_to_child = fds[1];
+        server.aof_pipe_read_data_from_parent = fds[0];
+        // 子进程向父进程发送ack
+        server.aof_pipe_write_ack_to_parent = fds[3];
+        server.aof_pipe_read_ack_from_child = fds[2];
+        // 父进程向子进程发送ack
+        server.aof_pipe_write_ack_to_child = fds[5];
+        server.aof_pipe_read_ack_from_parent = fds[4];
+        …
+    }
+    ```
+
+    feedAppendOnlyFile 函数在执行的最后一步，会判断当前是否有 AOF 重写子进程在运行。如果有的话，它就会调用 aofRewriteBufferAppend 函数，将参数 buf，追加写到全局变量 server 的 aof_rewrite_buf_blocks 这个列表中
+    ```c
+    if (server.aof_child_pid != -1)
+        aofRewriteBufferAppend((unsigned char*)buf,sdslen(buf));
+    ```
+
+    parent的管道上绑定的回调是`aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child, AE_WRITABLE, aofChildWriteDiffData, NULL);`
+
+    ```c
+    void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
+        ...
+        //检查aof_pipe_write_data_to_child描述符上是否有事件
+        if (aeGetFileEvents(server.el,server.aof_pipe_write_data_to_child) == 0) {
+             //如果没有注册事件，那么注册一个写事件，回调函数是aofChildWriteDiffData
+             aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child,
+                    AE_WRITABLE, aofChildWriteDiffData, NULL);
+        }
+        ...
+    }
+    ```
+
+    这样我们就知道，有正在重写的aof进程的情况下，7.0之前的redis，通过增加可写事件的方式，最终调用aofChildWriteDiffData，将buf数据写入管道中。
+
+    子进程调用aofReadDiffFromParent，从管道读出数据，保存在全局缓存里`read(server.aof_pipe_read_data_from_parent,buf,sizeof(buf))`
+
+    重写完成后，子进程则会调用`write(server.aof_pipe_write_ack_to_parent,"!",1)`，向父进程写入"!"，父进程写会一个"!"，这样他们就完成了结束的双向确认
+
+    ```c
+    void aofChildPipeReadable(aeEventLoop *el, int fd, void *privdata, int mask) {
+        ...
+        if (read(fd,&byte,1) == 1 && byte == '!') {
+           ...
+           if (write(server.aof_pipe_write_ack_to_child,"!",1) != 1) { ...}
+        }
+        ...
+    }
+    ```
+
+    到这里相互确认完，老版本的aof重写就完全完成了
 
     **************
     
