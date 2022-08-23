@@ -37,6 +37,7 @@
     - [redis持久化数据](#redis-persist-datas)
         - [RDB](#redis-rdb)
         - [AOF](#redis-aof)
+    - [redis主从复制](#redis-replica)
     
 - [性能优化](#性能优化)
     
@@ -1911,6 +1912,335 @@
         - 内存节约，省去了aof_rewrite_buf 这个结构，重写的时候没有使用多余的内存
 
         - 节约CPU资源，老版本相当于写两份，他写一份。不用往管道里写入，也节约了一些磁盘IO
+
+    redis-replica
+    ====
+
+    redis主从复制有四个阶段：
+    1. 从节点server初始化
+        
+        从节点在被设置为从节点的时候，会触发初始化操作。具体有下面几种：
+        
+        - 执行replicaof masterip masterport
+
+        - conf文件中指定replicaof masterip masterport
+
+        - redis-server 加入参数-replicaof masterip masterport
+
+    2. 从节点和主节点建立连接
+        
+        初始化之后，从节点会尝试和主节点建立TCP连接
+
+    3. 从节点和主节点确认连接（握手）
+        
+        从节点和主节点互相发送PINGPONG确认可以通信，并且从节点会向主节点发送自己的ip，port以及一些对协议的支持情况
+
+    4. 从节点判断复制类型并执行
+        
+        从发送`PSYNC` 获取更新类型（全量/增量）
+
+        从根据更新类型，执行具体数据的复制
+
+    redis关于从库的信息，一样配置在redisServer这个结构中
+
+    ```c
+    struct redisServer {
+       ...
+       /* 复制相关(slave) */
+        char *masterauth;               /* 用于和主库进行验证的密码*/
+        char *masterhost;               /* 主库主机名 */
+        int masterport;                 /* 主库端口号r */
+        …
+        client *master;        /* 从库上用来和主库连接的客户端 */
+        client *cached_master; /* 从库上缓存的主库信息 */
+        int repl_state;          /* 从库的复制状态 */
+       ...
+    }
+    ```
+
+    初始化的时候，通过调用`initServerConfig`，将一些状态进行初始化
+
+    ```c
+    // 初始化的时候默认不是从节点，这些都是默认端口ip
+    server.masterhost = NULL;
+    server.masterport = 6379;
+    server.master = NULL;
+    server.cached_master = NULL;
+    // 偏移量
+    server.master_initial_offset = -1;
+    // 状态设置为没有
+    server.repl_state = REPL_STATE_NONE;
+    // 和主节点交互的文件等
+    server.repl_transfer_tmpfile = NULL;
+    server.repl_transfer_fd = -1;
+    server.repl_transfer_s = NULL;
+    server.repl_syncio_timeout = CONFIG_REPL_SYNCIO_TIMEOUT;
+    // 偏移量
+    server.master_repl_offset = 0;
+    ```
+
+    而后，判定该节点被设置为从节点后，会调用`replicationSetMaster`, 他会设置master的信息，设置成功后把状态前进到CONNECT
+
+    ```c
+    void replicationSetMaster(char *ip, int port) {
+        ...
+
+        disconnectAllBlockedClients();
+    
+        server.masterhost = sdsnew(ip);
+        server.masterport = port;
+    
+        setOOMScoreAdj(-1);
+    
+        // 如果有建立的连接，终止
+        cancelReplicationHandshake(0);
+        // 以前有信息，清理掉
+        if (was_master) {
+            replicationDiscardCachedMaster();
+            replicationCacheMasterUsingMyself();
+        }
+    
+        // 产生就绪的事件
+        moduleFireServerEvent(REDISMODULE_EVENT_REPLICATION_ROLE_CHANGED,
+                              REDISMODULE_EVENT_REPLROLECHANGED_NOW_REPLICA,
+                              NULL);
+    
+        // 如果以前建立过，再额外分一个变更的通知
+        if (server.repl_state == REPL_STATE_CONNECTED)
+            moduleFireServerEvent(REDISMODULE_EVENT_MASTER_LINK_CHANGE,
+                                  REDISMODULE_SUBEVENT_MASTER_LINK_DOWN,
+                                  NULL);
+    
+        // 更新状态值
+        server.repl_state = REPL_STATE_CONNECT;
+        // 调用连接函数
+        connectWithMaster();
+    }
+    ```
+
+    setMaster主要用来初始化从节点配置，结束后会进入下一状态并调用连接函数进行连接
+
+    如果由于其他原因被回滚到这个状态，redis会在serverCron中起一个replacationCron，其中的updateFailoverStatus函数会继续尝试初始化配置
+
+    ```c
+    void replicationCron() {
+       updateFailoverStatus();
+       ...
+    }
+    ```
+
+    这个函数主要维护了所有主从状态的转移，每个状态检查是否要进入下一个状态（fail回滚到上个状态保证能继续往下走）
+
+    连接状态，主要工作就是建立连接，并进入到connecting状态
+
+    ```c
+    int connectWithMaster(void) {
+        // syncWithMaster是回调函数，建立之后就会调用
+        server.repl_transfer_s = server.tls_replication ? connCreateTLS() : connCreateSocket();
+        if (connConnect(server.repl_transfer_s, server.masterhost, server.masterport,
+                    server.bind_source_addr, syncWithMaster) == C_ERR) {
+            serverLog(LL_WARNING,"Unable to connect to MASTER: %s",
+                    connGetLastError(server.repl_transfer_s));
+            connClose(server.repl_transfer_s);
+            server.repl_transfer_s = NULL;
+            return C_ERR;
+        }
+    
+    
+        server.repl_transfer_lastio = server.unixtime;
+        server.repl_state = REPL_STATE_CONNECTING;
+        serverLog(LL_NOTICE,"MASTER <-> REPLICA sync started");
+        return C_OK;
+    }
+    ```
+
+    connectWithMaster正常情况下会在setMaster中调用，同样他也会在cron中检查，保证因为握手失败等原因回退的从节点建立能继续执行
+
+    ```c
+    void replicationCron() {
+       …
+       /* 如果从库实例的状态是REPL_STATE_CONNECT，那么从库通过connectWithMaster和主库建立连接 */
+        if (server.repl_state == REPL_STATE_CONNECT) {
+            // 继续尝试调用
+            if (connectWithMaster() == C_OK) {
+                serverLog(LL_NOTICE,"MASTER <-> REPLICA sync started");
+            }
+        }
+        …
+    }
+    ```
+
+    一旦进入connect最后，状态机被置为REPL_STATE_CONNECTING, 他会调用syncWithMaster
+
+    这个函数在REPL_STATE_CONNECTING阶段会比较简单，他直接发一个PING给master，并且状态设置为REPL_STATE_RECEIVE_PING_REPLY
+
+    ```c
+    if (server.repl_state == REPL_STATE_CONNECTING) {
+        connSetReadHandler(conn, syncWithMaster);
+        connSetWriteHandler(conn, NULL);
+        server.repl_state = REPL_STATE_RECEIVE_PING_REPLY;
+        err = sendCommand(conn,"PING",NULL);
+        if (err) goto write_error;
+        return;
+    }
+    ```
+
+    可以看到，当这个连接上有可读事件的时候，他会再次调用sync回来，这个时候状态已经是PING_REPLAY了
+
+    那他就会进入REPL_STATE_SEND_HANDSHAKE阶段，给主节点发送握手需要的协议（如果需要AUTH，先发AUTH
+
+    ```c
+    if (server.repl_state == REPL_STATE_RECEIVE_PING_REPLY) {
+        err = receiveSynchronousResponse(conn);
+
+        if (err == NULL) goto no_response_error;
+        if (err[0] != '+' &&
+            strncmp(err,"-NOAUTH",7) != 0 &&
+            strncmp(err,"-NOPERM",7) != 0 &&
+            strncmp(err,"-ERR operation not permitted",28) != 0)
+        {
+            serverLog(LL_WARNING,"Error reply to PING from master: '%s'",err);
+            sdsfree(err);
+            goto error;
+        } else {
+            serverLog(LL_NOTICE,
+                "Master replied to PING, replication can continue...");
+        }
+        sdsfree(err);
+        err = NULL;
+        // 进入握手阶段
+        server.repl_state = REPL_STATE_SEND_HANDSHAKE;
+    }
+
+    if (server.repl_state == REPL_STATE_SEND_HANDSHAKE) {
+        // 如果需要认证先发auth
+        if (server.masterauth) {
+            char *args[3] = {"AUTH",NULL,NULL};
+            size_t lens[3] = {4,0,0};
+            int argc = 1;
+            if (server.masteruser) {
+                args[argc] = server.masteruser;
+                lens[argc] = strlen(server.masteruser);
+                argc++;
+            }
+            args[argc] = server.masterauth;
+            lens[argc] = sdslen(server.masterauth);
+            argc++;
+            err = sendCommandArgv(conn, argc, args, lens);
+            if (err) goto write_error;
+        }
+
+        //这里已经AUTH通过了，那么给主库发送自己的端口
+        //这个阶段监控主节点就能看REPLCONF请求
+        //从节点信息发送完，在主节点上执行INFO指令就能看到从节点了
+        {
+            int port;
+                ...
+                port = server.port;
+            sds portstr = sdsfromlonglong(port);
+            err = sendCommand(conn,"REPLCONF",
+                    "listening-port",portstr, NULL);
+            sdsfree(portstr);
+            if (err) goto write_error;
+        }
+
+        // 发送自己的ip
+        if (server.slave_announce_ip) {
+            err = sendCommand(conn,"REPLCONF",
+                    "ip-address",server.slave_announce_ip, NULL);
+            if (err) goto write_error;
+        }
+
+        // 对 RDB 文件和无盘复制的支持情况
+        err = sendCommand(conn,"REPLCONF",
+                "capa","eof","capa","psync2",NULL);
+        if (err) goto write_error;
+
+        // 上面相当于是一个完整的逻辑，其实每一步都有自己对应的状态和失败处理，下面都略去了
+        server.repl_state = REPL_STATE_RECEIVE_AUTH_REPLY;
+        return;
+    }
+
+    ... 每种子请求的状态处理
+    //上面从库信息/支持的协议都同步完后，进入这个状态
+    server.repl_state = REPL_STATE_RECEIVE_CAPA_REPLY
+    ```
+
+    校验完，同步完配置信息，那就要真的开始数据的传输了
+    
+    同样在这个函数里
+
+    ```c
+    /* 从库状态机进入REPL_STATE_RECEIVE_CAPA. */
+    if (server.repl_state == REPL_STATE_RECEIVE_CAPA) {
+      …
+      //读取主库返回的CAPA消息响应
+           server.repl_state = REPL_STATE_SEND_PSYNC;
+      }
+      //从库状态机变迁为REPL_STATE_SEND_PSYNC后，开始调用slaveTryPartialResynchronization函数向主库发送PSYNC命令，进行数据同步
+      if (server.repl_state == REPL_STATE_SEND_PSYNC) {
+           // 把自己的offset发给主库
+           if (slaveTryPartialResynchronization(fd,0) == PSYNC_WRITE_ERROR)      
+           {
+                 …
+           }
+           server.repl_state = REPL_STATE_RECEIVE_PSYNC;
+              return;
+      }
+    ```
+
+    主从库通过slaveTryPartialResynchronization发送offset给主库
+
+    主库返回这次复制是全量还是增量或是错误
+
+    ```c
+    int slaveTryPartialResynchronization(int fd, int read_reply) {
+        …
+        //发送PSYNC命令
+        if (!read_reply) {
+            //从库第一次和主库同步时，设置offset为-1
+        server.master_initial_offset = -1;
+        …
+        //调用sendSynchronousCommand发送PSYNC命令
+        reply =
+        sendSynchronousCommand(SYNC_CMD_WRITE,fd,"PSYNC",psync_replid,psync_offset,NULL);
+         …
+         //发送命令后，等待主库响应
+         return PSYNC_WAIT_REPLY;
+         }
+     
+        //读取主库的响应
+        reply = sendSynchronousCommand(SYNC_CMD_READ,fd,NULL);
+     
+        //主库返回FULLRESYNC，全量复制
+        if (!strncmp(reply,"+FULLRESYNC",11)) {
+         …
+         return PSYNC_FULLRESYNC;
+         }
+     
+        //主库返回CONTINUE，执行增量复制
+        if (!strncmp(reply,"+ CONTINUE",11)) {
+        …
+        return PSYNC_CONTINUE;
+         }
+     
+        //主库返回错误信息
+        if (strncmp(reply,"-ERR",4)) {
+           …
+        }
+        return PSYNC_NOT_SUPPORTED;
+    }
+    ```
+
+    可以看到redis的主从复制，从节点基于状态机实现了11种（宏定义最高到11）状态的切换机制
+
+    这种机制可以应对某一步网络等原因出错的情况
+
+    然后通过offset实现了全量/增量复制的判断
+
+    主库则不需要状态机，他只是相应从库的数据
+
+
 
     **************
     
