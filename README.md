@@ -38,6 +38,9 @@
         - [RDB](#redis-rdb)
         - [AOF](#redis-aof)
     - [redis主从复制](#redis-replica)
+    - [redis哨兵](#redis-sentinel)
+        - [init](#redis-sentinel-init)
+        - [vote](#redis-sentinel-vote)
     
 - [性能优化](#性能优化)
     
