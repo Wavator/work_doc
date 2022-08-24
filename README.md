@@ -2238,7 +2238,190 @@
 
     然后通过offset实现了全量/增量复制的判断
 
-    主库则不需要状态机，他只是相应从库的数据
+    主库则不需要状态机，他只是回应从库的请求。
+
+
+    redis-sentinel
+    ====
+
+    redis哨兵机制是redis可靠性的第二个保障
+
+    redis哨兵是比较特殊的redis server，一个redis实例启动后会确定他的身份是否是哨兵，在shutdown之前是不可以变化的
+
+    sentinel-init
+    ====
+
+    有两种方式去启动一个哨兵实例
+
+    1. redis-sentinel xxx.conf
+
+    2. redis-server xxx.conf –-sentinel
+
+    redis启动的时候，在initServerConfig 之前，会调用 checkForSentinelMode 函数，来确定当前实例是不是哨兵
+
+    ```c
+    int checkForSentinelMode(int argc, char **argv) {
+        int j
+        // 判断是不是第一种
+        if (strstr(argv[0],"redis-sentinel") != NULL) return 1;
+        for (j = 1; j < argc; j++)
+            // 判断是不是第二种
+            if (!strcmp(argv[j],"--sentinel")) return 1;
+        return 0;
+    }
+    ```
+
+    这样他就通过这个函数，给全局变量`sentinel_mode` 设置一个值 `server.sentinel_mode = checkForSentinelMode(argc,argv);`
+
+    先走通用的redis server启动函数，因为哨兵其实也是一个server，在这个initServerConfig里面有个比较重要的函数`populateCommandTable`
+
+    他会把哨兵的部分命令替换为哨兵自己的实现
+
+    ```c
+    void populateCommandTable(void) {
+        int j;
+        struct redisCommand *c;
+    
+        for (j = 0;; j++) {
+            c = redisCommandTable + j;
+            if (c->declared_name == NULL)
+                break;
+    
+            int retval1, retval2;
+            c->fullname = sdsnew(c->declared_name);
+            if (populateCommandStructure(c) == C_ERR)
+                continue;
+            retval1 = dictAdd(server.commands, sdsdup(c->fullname), c);
+            retval2 = dictAdd(server.orig_commands, sdsdup(c->fullname), c);
+            serverAssert(retval1 == DICT_OK && retval2 == DICT_OK);
+        }
+    }
+    ```
+
+    他这里把命令给换成这个`{"sentinel","A container for Sentinel commands","Depends on subcommand.","2.8.4",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SENTINEL,SENTINEL_History,SENTINEL_tips,NULL,-2,CMD_ADMIN|CMD_SENTINEL|CMD_ONLY_SENTINEL,0,.subcommands=SENTINEL_Subcommands},`
+
+    具体有哪些可以在哨兵输入help查看支持的命令
+
+    ```c
+    // 检查当前quorum的值
+    "CKQUORUM <master-name>",
+    "    Check if the current Sentinel configuration is able to reach the quorum",
+    "    needed to failover a master and the majority needed to authorize the",
+    "    failover.",
+    // config配置一些参数，低版本则不支持
+    "CONFIG SET <param> <value>",
+    "    Set a global Sentinel configuration parameter.",
+    "CONFIG GET <param>",
+    "    Get global Sentinel configuration parameter.",
+    "DEBUG [<param> <value> ...]",
+    "    Show a list of configurable time parameters and their values (milliseconds).",
+    "    Or update current configurable parameters values (one or more).",
+    "GET-MASTER-ADDR-BY-NAME <master-name>",
+    "    Return the ip and port number of the master with that name.",
+    // 强制认为主节点下线
+    "FAILOVER <master-name>",
+    "    Manually failover a master node without asking for agreement from other",
+    "    Sentinels",
+    "FLUSHCONFIG",
+    "    Force Sentinel to rewrite its configuration on disk, including the current",
+    "    Sentinel state.",
+    "INFO-CACHE <master-name>",
+    "    Return last cached INFO output from masters and all its replicas.",
+    "IS-MASTER-DOWN-BY-ADDR <ip> <port> <current-epoch> <runid>",
+    "    Check if the master specified by ip:port is down from current Sentinel's",
+    "    point of view.",
+    // 打印主节点配置
+    "MASTER <master-name>",
+    "    Show the state and info of the specified master.",
+    "MASTERS",
+    "    Show a list of monitored masters and their state.",
+    "MONITOR <name> <ip> <port> <quorum>",
+    "    Start monitoring a new master with the specified name, ip, port and quorum.",
+    "MYID",
+    "    Return the ID of the Sentinel instance.",
+    "PENDING-SCRIPTS",
+    "    Get pending scripts information.",
+    "REMOVE <master-name>",
+    "    Remove master from Sentinel's monitor list.",
+    "REPLICAS <master-name>",
+    "    Show a list of replicas for this master and their state.",
+    "RESET <pattern>",
+    "    Reset masters for specific master name matching this pattern.",
+    "SENTINELS <master-name>",
+    "    Show a list of Sentinel instances for this master and their state.",
+    "SET <master-name> <option> <value> [<option> <value> ...]",
+    "    Set configuration parameters for certain masters.",
+    "SIMULATE-FAILURE [CRASH-AFTER-ELECTION] [CRASH-AFTER-PROMOTION] [HELP]",
+    "    Simulate a Sentinel crash.",
+    ```
+
+    而后sentinel模式的节点会走自己的初始化配置和初始化函数
+
+    ```c
+    if (server.sentinel_mode) {
+       initSentinelConfig();
+       initSentinel();
+    }
+    ```
+
+    初始化配置的比较简单，他只是去改变redis的哨兵端口（改为宏定义的26379）
+    
+    并且取消保护模式，相当于哨兵一定是暴露给不同host的
+
+    ```c
+    void initSentinelConfig(void) {
+        server.port = REDIS_SENTINEL_PORT;
+        server.protected_mode = 0; /* Sentinel must be exposed. */
+    }
+    ```
+    
+    initSentinel 则是初始化了哨兵用到的一些全局变量或者数据结构,这其中包括了哨兵实例的 ID、用于故障切换的当前纪元、监听的主节点、正在执行的脚本数量，以及与其他哨兵实例发送的 IP 和端口号等信息
+
+    到这里准备工作就完成了，main中会调用sentinelIsRunning 函数，这个时候哨兵实例就成功启动了
+
+    这个函数其实是给哨兵生成一个id（如果没有）,再调用 sentinelGenerateInitialMonitorEvents 函数（在 sentinel.c 文件中），给每个被监听的主节点发送事件信息
+
+    ```c
+    void sentinelGenerateInitialMonitorEvents(void) {
+        dictIterator *di;
+        dictEntry *de;
+    
+        di = dictGetIterator(sentinel.masters);//获取masters的迭代器
+        while((de = dictNext(di)) != NULL) { //获取被监听的主节点
+            sentinelRedisInstance *ri = dictGetVal(de);
+            sentinelEvent(LL_WARNING,"+monitor",ri,"%@ quorum %d",ri->quorum);   //发送+monitor事件
+        }
+        dictReleaseIterator(di);
+    }
+    ```
+    
+    可以看到他给所有主节点的+monitor频道发了一个"%@ quorum %d",ri->quorum
+
+    相当于通知主节点和其他监控了主节点的哨兵节点，当前节点开始监听该主节点
+
+    他怎么知道主节点是谁的，就和哨兵的一个结构有关
+    ```c
+    typedef struct sentinelRedisInstance {
+        int flags;      //实例类型、状态的标记, 有SRI_MASTER、SRI_SLAVE 或 SRI_SENTINEL, 表示主从或者哨兵
+        char *name;     //实例名称
+        char *runid;    //实例ID
+        uint64_t config_epoch;  //配置的纪元
+        sentinelAddr *addr; //实例地址信息
+        ...
+        mstime_t s_down_since_time; //主观下线的时长
+        mstime_t o_down_since_time; //客观下线的时长
+        ...
+        dict *sentinels;    //监听同一个主节点的其他哨兵实例
+        dict *slaves;   //主节点的从节点
+        ...
+    }
+    ```
+
+    哨兵模式下，每个实例对应了一个这样的结构，里面表明了自己的类型，如果是哨兵，还会有监控的主节点和主节点的从节点信息
+
+
+    redis-sentinel-vote
+    ====
 
 
 
