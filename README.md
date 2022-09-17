@@ -24,6 +24,13 @@
         - [wrk](#wrk)
         - [火焰图](#火焰图)
 
+- [Lua GC](#LuaGC)
+    - [双色标记](#双色标记)
+    - [三色标记](#三色标记)
+        - [原理](#三色标记原理)
+        - [增量GC](#增量GC)
+        - [多线程GC](#多线程GC)
+
 - [redis](#redis)
     - [base-data-structure](#redis-data-structure)
         - [string](#redis-string)
@@ -60,6 +67,8 @@
             - 竞技场信息
             - 战力模块
         - [gate CPU优化](doc_2208)
+    - [2209](doc_2209)
+
 
     OpenResty
     ====
@@ -357,6 +366,101 @@
     
     #scp或者ftp之类的把这个a.svg换个名字发出去，放到网页上大家就都能看了
     ```
+    
+    LuaGC
+    ====
+
+    最近开了个坑，起因是因为我在自以为已经对Lua比较了解的情况下，看了一篇关于Lua GC的介绍 [Lua GC算法并行化探讨](https://zhuanlan.zhihu.com/p/564165613), 看完觉得我对力量一无所知，决定开始整理一下Lua GC的原始算法，改进后的三色GC（包括如何实现增量GC，这个是以前没有认真看过的），以及文章中提到的并行化思路。
+    
+    双色标记
+    ====
+    
+    先来看一下双色标记，这个算法适用于Lua 5.1之前，项目里已经没有这么古老版本的Lua了，这个整体逻辑也比较简单，就是比较朴素的标记-清除算法
+    
+    1. 从根节点（GC ROOT）出发，扫描所有节点，对于可以通过引用链找到的对象标记为可达（黑色），没有的就是垃圾（白色）
+    2. 从全局的需要GC的对象链表里面，把刚才没扫描到的都删除
+
+    原理看上去简单，但是有些概念需要思考和验证，下面介绍三色GC的时候一起看
+    
+    缺点很明显，这个过程不可能被打断，不然假设中间new出来的都是白的，就被直接回收了；假设中间new出来是黑的，这个黑的里面有个指向白色的引用，那你把白的干掉了，黑的里面就多了个野指针，对应到Lua侧的使用就是你 `if a.b then print(type(a.b)) end` 能打出个nil来，这样根本就不能用了，所以也是不行的。
+    
+    所以为了保证正确性，双色GC不可被打断。
+    
+    所以这种做法必须是同步阻塞地执行，也就是传说中的STW（stop the world）回收，这个时候主线程在GC结束之前就不能继续干别的事情了，从用户侧看起来就是游戏卡了。
+
+    三色标记
+    ====
+    
+    双色这么不聪明，肯定要改，目前的Lua用的都是三色GC法，这个和Go之类的语言一样的，整体比较复杂
+    
+    首先看看全局GC对象保存在哪
+    ```c
+    typedef union Value {
+        GCObject *gc;
+        ...
+    } 
+    GCObject *luaC_newobj (lua_State *L, int tt, size_t sz) {
+      global_State *g = G(L);
+      GCObject *o = cast(GCObject *, luaM_newobject(L, novariant(tt), sz));
+      o->marked = luaC_white(g);
+      o->tt = tt;
+      o->next = g->allgc;
+      g->allgc = o;
+      return o;
+    }
+    ```
+    
+    所以当一个Lua Value出现的时候，他一定会被挂到这个全局的global state里面的allgc链表上，并且被`lucC_white` 方法标记为白色
+    
+    有了这些对象的引用，Lua就可以选择在合适的时机，或者手动调用GC了，手动调用GC就是 lua侧调用 `collectgarbage ([opt [, arg]])` ，自动GC就是lua自己算的，大量内存增长的时候都会调用`luaC_checkGC`，避免OOM等情况的发生
+    
+    现在触发GC的时机和GC需要关联的全局表已经看完了，接下来就是三色GC的具体内容
+    
+    他和双色GC的区别主要有这么几个
+    1. 最明显的区别，多了一个颜色（灰色），灰色代表自己已经被遍历到了，但是自己引用到的那些节点还没有被完整遍历
+    2. 黑色的定义也相应更改，更改为这个对象和他的引用的所有节点都已经被GC算法完整遍历。也就是说，你拿到一个黑色节点，就能知道他所有k-v都是确定存活的状态。
+    3. 白色对象也增加了一个bit（0或1）来标记他是不是这次GC可以清理的白色对象。我们刚才看到new出来都是白的，那么一轮标记结束，清除阶段肯定不能把标记结束后new出来的白色对象清理掉，所以lua在这里会给这种对象打一个标记bit，用bit对比来确定是不是这一轮可以删除的白色对象
+    4. 他采用了barrier 和 上面说的白色对象设置bit两个方式合作，避免回收不该回收的对象或者产生野指针
+    5. 他使用了一个状态机`static lu_mem singlestep (lua_State *L)` 来控制整个GC流程
+    
+    先看看白色对象有哪些特殊的地方
+    
+    1. 控制当前GC流程删除哪个bit的白色对象，是`global_State` 的 `currentwhite` 控制的。
+    2. 特殊数据类型：`userData`， 他比较特殊，`userdata` 由于 `gc` 元方法的存在，释放所占内存是需要延迟到 `gc` 元方法调用之后的
+    3. KEYWEAKBIT 和 VALUEWEAKBIT 用于标记 table 的 weak 属性, 就是有些表不用KV都还在被引用就可以被GC掉，weak的表和其他对象存在不同列表里，有些特殊的处理
+    4. 部分string，设置为不可回收（他们可能根本就没被引用到），这个举个例子，就是你Lua继承，调了一个`x[funcName]()`，他要先比较这个funcName是不是__index，那他要么调用 `strcmp` 做比较；要么使用 `lua_pushlstring` （lua）或者`lj_str_new`(lua-jit)将需要比较的 string 压入 lua_State ，然后再比较。后面的做法在string new出来之后就成了比较引用了（因为无论是lua的实现还是luajit的实现，一个字符串在lua内存里都是一份final值，拿出来都是一个引用），所以后面的做法会比直接strcmp快不知道多少倍了。他高效，所以我们不希望他从Lua的内存里被GC掉。所以Lua就把下面这些字符串保护了起来
+        ```c
+        static const char *const luaT_eventname[] = {  /* ORDER TM */
+            "__index", "__newindex",
+            "__gc", "__mode", "__eq",
+            "__add", "__sub", "__mul", "__div", "__mod",
+            "__pow", "__unm", "__len", "__lt", "__le",
+            "__concat", "__call"
+        };
+        ```
+        
+    再看看barrier机制
+    ![](assets/16634008909873.jpg)
+    看到主要是两步操作，对于新Obj B，假设他被黑色节点A引用，那存在两种可行的标记操作
+    1. 改变B，也就是barrier fwd，新对象设置为灰色，等待GC算法遍历，相当于前进一步，Lua表之外的对象走的是这个。
+    2. 改变A，也就是barrier back，引用到他的设置为灰色，意味着这一轮还要再遍历一次，相当于倒退一步，这个只对Lua table使用。
+
+    fwd其实很好理解，主要看看back，以及分析一下为什么特殊对待Lua Table
+
+    ```c
+    void luaC_barrierback (lua_State *L, Table *t) {
+      global_State *g = G(L);
+      GCObject *o = obj2gco(t);
+      lua_assert(isblack(o) && !isdead(g, o));
+      lua_assert(g->gcstate != GCSfinalize && g->gcstate != GCSpause);
+      black2gray(o);  /* make table gray (again) */
+      t->gclist = g->grayagain;
+      g->grayagain = o;
+    }
+    ```
+    
+    
+
     
     redis
     ====
