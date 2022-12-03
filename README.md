@@ -377,7 +377,7 @@
     这个东西本身用起来很简单，就ngx.timer.at(t, func)就行，但是真的到了线上，还是会遇到一些问题，这里总结一下
     
     1. 数量超过限制
-    	线上我们的lua server，lua_max_pending_timers和lua_max_running_timers 在nginx.conf里当然配置的比较大(8192,4096),但是还有一种情况，在定时器脚本中，timer的数量并不受nginx.conf控制，还是默认的1024，也就导致我们跑结算脚本的时候触发了"worker connections not enough"的bug，丢失了一部分数据。我借鉴其他人的做法重新封装了脚本里的timer，并把项目里的所有ngx.timer替换为封装的timer
+    	线上我们的lua server，lua_max_pending_timers和lua_max_running_timers 在nginx.conf里当然配置的比较大(8192,4096),但是还有一种情况，在定时器脚本中，timer的数量并不受nginx.conf控制，还是默认的256，也就导致我们跑结算脚本的时候触发了"worker connections not enough"的bug，丢失了一部分数据。我借鉴其他人的做法重新封装了脚本里的timer，并把项目里的所有ngx.timer替换为封装的timer
     	```lua
     	local timer = ngx.timer
     	function _M:get_alive_count()
