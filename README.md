@@ -19,6 +19,8 @@
         - [cosocket](#cosocket)
         - [lua-resty-core](#lua-resty-core)
         - [cache](#cache)
+        - [ngx_timer](#ngx_timer)
+        - [lua-resty-mysql](#lua-resty-mysql)
     
     - [压力测试和火焰图](#压力测试和火焰图)
         - [wrk](#wrk)
@@ -366,6 +368,132 @@
     
     #scp或者ftp之类的把这个a.svg换个名字发出去，放到网页上大家就都能看了
     ```
+    
+    ngx_timer
+    ====
+    
+    ngx_timer是用来定时启动一个子任务的方法，业务逻辑一般用他做一些批量提交或者异步处理的行为
+    
+    这个东西本身用起来很简单，就ngx.timer.at(t, func)就行，但是真的到了线上，还是会遇到一些问题，这里总结一下
+    
+    1. 数量超过限制
+    	线上我们的lua server，lua_max_pending_timers和lua_max_running_timers 在nginx.conf里当然配置的比较大(8192,4096),但是还有一种情况，在定时器脚本中，timer的数量并不受nginx.conf控制，还是默认的1024，也就导致我们跑结算脚本的时候触发了"worker connections not enough"的bug，丢失了一部分数据。我借鉴其他人的做法重新封装了脚本里的timer，并把项目里的所有ngx.timer替换为封装的timer
+    	```lua
+    	local timer = ngx.timer
+    	function _M:get_alive_count()
+        	local base_count = timer.pending_count() + timer.running_count()
+        	return base_count + (setting:is_running_script() and 1 or 0)
+    	end
+    
+    	function _M:base_timer_at(time, callback, ...)
+        	if (tonumber(time) or 0) < 0 or
+            	(setting:is_running_script() and self:get_alive_count() > 128)
+            	then
+            	callback(0, ...)
+            	return
+        	end
+        	local _, err1 = timer.at(time, callback, ...)
+        	if err1 ~= nil then
+            	local _, err = timer.at(0, callback, ...)
+            	if err ~= nil then
+                	callback(0, ...)
+                	print("create ngx.timer.at failed. err:", err)
+            	end
+        	end
+    	end
+    
+    	```
+    	
+    	就是脚本的情况下使用ngx.timer.pending_count() + ngx.timer.running_count() 获取当前运行的timer数量，如果超过128，则直接执行回调。
+    
+    2. 上下文问题
+    	timer的ngx.ctx并不继承原本的请求，结束的时候也不会走到我们一个请求固定的逻辑（比如keepalive, 推送给玩家信息，记录日志等）
+    	所以把上面接口又封装了一层，涉及比较多业务代码，这边就先略去了，原理就是把ngx ctx clone一份，然后二次封装一下timer，让他真正的像一个请求
+ 
+    lua-resty-mysql
+    ====
+    项目里，是直接new一个resty.mysql实例，作为请求级别的mysql使用，主要调用query/send_query接口，请求结束还会调用keepalive放入连接池
+    
+    在某天更新版本之后，线上有个表再也没有数据新增了，没有任何报错，内网是可以复现的，这种BUG都比较容易检查
+    
+    内网增加了一些打印，发现query的时候错误没有处理，err 本身是"cannot send query in the current context"
+    
+    源码看一下马上就找到问题了。
+    ```lua
+    local function send_query(self, query)
+        if self.state ~= STATE_CONNECTED then
+            return nil, "cannot send query in the current context: "
+                        .. (self.state or "nil")
+        end
+    
+    ```
+    然后看了一下，resty mysql send的时候如果当前连接建立了且发送了请求，但没有读完，则会直接return。
+    所以是有人调用了他的send_query接口，但是没有调用read_result把结果读完，导致这个请求的后续sql全都不能正常执行了
+    
+    项目轻度使用mysql，以前没有出过问题，现在战报往两个数据库存，就原形毕露了。
+    改有两种改法，一种是把连接的建立改为command级别，在外面再封装一层
+    ```lua
+    local resty_mysql = require 'resty.mysql'
+    function _M:query(...)
+    	-- resty mysql connect
+    	-- resty mysql query
+    	-- resty mysql keepalive
+    end
+    
+    function _M:send_query(...)
+    	-- resty mysql connect
+    	-- resty mysql query
+    	-- resty mysql close
+    end
+    ```
+    send_query直接关闭连接，或者读完也可以，读完就等价于query。这种做法看似优雅，实际上测试成本很高，不适合项目做到一半换
+    
+    另一种比较暴力，我也是选的这一种
+    ```lua
+    function _M.query(self, query, est_nrows)
+        local bytes, err = send_query(self, query)
+        if not bytes then
+            return nil, "failed to send query: " .. err
+        end
+    
+        local res, err1 = read_result(self, est_nrows)
+        if not res or err1 then
+            --ngx.log(ngx.ERR, "[Mysql error %s] %s", self.sock and self.sock[3] or "-", tostring(err1))
+            local function log_err()
+                local logger = require 'framework.log.base_logger'
+                logger.error(string.format("[Mysql error %s] err: %s\nquery: %s",
+                        tostring(self.sock and self.sock[3] or '-'), tostring(err1), tostring(query)
+                    )
+                )
+            end
+            local result = nil
+            if err1 and err1 == "again" then
+                result = {res}
+                while err1 == "again" do
+                    local t_res
+                    t_res, err1 = read_result(self, est_nrows)
+                    if not t_res then
+                        log_err()
+                        return nil, err1
+                    end
+                    table.insert(result, t_res)
+                end
+            else
+                log_err()
+            end
+            return result, err1
+        else
+            return res, err1
+        end
+    end
+    
+    function _M.send_query(...)
+        return _M.query(...)
+    end
+    
+    ```
+    没错，我直接把resty.mysql的query接口改了，并且send_query直接定义等于query，因为我还是想复用连接，既然send也要读完，我干脆直接query就好了
+    还顺手封装了一下query的 error="again"这种情况
     
     LuaGC
     ====
