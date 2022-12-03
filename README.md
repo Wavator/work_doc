@@ -23,8 +23,7 @@
     - [压力测试和火焰图](#压力测试和火焰图)
         - [wrk](#wrk)
         - [火焰图](#火焰图)
-    - [ngx_timer](#ngx_timer)
-    
+
 - [Lua GC](#LuaGC)
     - [双色标记](#双色标记)
     - [三色标记](#三色标记)
@@ -51,7 +50,8 @@
         - [vote](#redis-sentinel-vote)
     
 - [性能优化](#性能优化)
-  
+    
+
 - 按月总结的bug,后端问题排查和优化
     - [2207](doc_2207)
         - [排查redis连接数过高](doc_2207#p1)
@@ -73,17 +73,15 @@
     OpenResty
     ====
 
-
-​    
+    
     这周比较系统的学习了一下OpenResty（当然说掌握还差很多，但也收获不小），看看平时开发/测试的时候还是有一些坑，要进行规避
     
     luajit
     ====
     
     LuaJit ~= Lua5.1，用的时候还是要仔细选择高性能接口。Jit的原理基础的都懂，高深的暂时没有研究的想法。
-
-
-​    
+    
+    
     test
     ====
     
@@ -114,7 +112,7 @@
     测试code大概是
     ```lua
     local sz = 1000000
-    
+
     local function test_a(real)
         local a = table.new(sz, 0)
         for i = 1, sz do
@@ -128,16 +126,15 @@
             a[i] = sz - i
         end
     end
-    
+
     -- 0.027999877929688s
     ```
     性能差距还是有点大的，sz去掉一个0（这个sz跑insert根本跑不完，O(t*n^2)，去掉一个0我都跑了特别久），测试一下`table.insert`，比第二个还慢几十倍，原因是每次取#是On的操作，虽然LuaJit官网说可以优化append类型的insert，但是还是很慢，估计#操作并不好优化，不然应该是慢2倍而不是几十倍了。另外不循环很多次前两个时间上没有区别。
     实际项目中，对于已知大小的table/hashtable，应当采用`table.new`，`table.insert`虽然代码可读性很高，但是还是减少使用，冷热代码均是如此，原因是因为对于没被Jit优化的代码他是真的O(n^2)，优化过之后也有几十倍的性能差距
     
     table.clear和table池估计实际用不到，不测了，等table new成为性能瓶颈可以回来看看
-
-
-​    
+    
+    
     string
     ====
     
@@ -148,7 +145,7 @@
     - string.byte，据说这个是神器，string.char(string.byte("abc", 1, 2)) 比string.sub的写法少生成很多中间string，让我来试试，测试用1000长度的字符串随机两个pos，分别用string.sub(posa, posb), string.char(string.byte("abc", posa, posb))比对运行时间
         ```lua
         local sz = 1000
-    
+
         local str
         
         local a = table.new(sz, 0)
@@ -180,9 +177,8 @@
         ```
         测试并没有得到我想要的结果，byte这样会更慢，应该是char+byte是两步操作，且sub和char，byte都不在NYI里面，所以单独效率上没有区别，那再看看后面这种是否比sub更节约内存，top了一下分别运行，感觉没有，内存是一样的。
         说明string.sub是可以用的操作，OpenResty最佳实践的作者可能版本老一些，或者我测试的姿势不对.
-
-
-​    
+        
+    
     os
     ====
     
@@ -225,7 +221,7 @@
     ====
     
     OpenResty个人感觉下来对后端开发最大的便利就是同步非阻塞，不然后端读个redis实现起来可能相当复杂，后端每个redis操作相当于都是传命令+回调，先coroutine 装一下redis操作，里面luasocket连一下redis，协程阻塞读，读完返回resume执行回调。这样就太麻烦了，而且相当于没有好好利用nginx的事件循环机制去做这些事情。
-    
+
     OpenResty在这一块已经完全做好了，在有网络IO的情况下他会自动把当前的lua runtime挂起来，然后把网络IO的回调注册到Nginx的事件循环里面，这个时候worker的CPU就可以去处理别的请求了。网络IO返回之后，这个lua runtime又会被唤醒（基于Nginx，其实是等待worker调度，这里也可以看出大量非网络IO的操作会影响其他协议的处理速度，两个都接到一个worker，都走到content_by_lua，一个开始大量运算，另一个就会被长时间挂起，引发更多问题）。这里还要说一下同步非阻塞说的必须是OpenResty提供的模块，nginx-xxx-module或者lus-resty-xxxx才是同步非阻塞的，因为只有用人家的接口人家才自动帮你做挂起，注册，唤醒这一系列操作。所以自己写的网络IO等操作（比如自己写了个模块调用luasocket请求），lua自带的函数（os.xxx, io.xxx），均不能被OpenResty调度，都是同步阻塞的，开发中要尽量减少使用，如果有大量的类似CPU运算，文件读取的操作，考虑扔给其他服务做。
     
     cosocket
@@ -234,14 +230,14 @@
     这个模块是现在OpenResty比较推荐使用的网络模块，lua-resty-*的大部分网络库比如redis mysql dns等都是基于这个实现的，也就是[ngx.socket.tcp](https://github.com/openresty/lua-nginx-module#tcpsockconnect)（其实也有[udp](https://github.com/openresty/lua-nginx-module#ngxsocketudp)版本），他可以看作lua-socket的非阻塞版。大部分生命周期都是可以使用的。
     
     理解是做什么的也很简单，协程套接字这个直译已经足够明确，做的是socket的工作，同时满足OpenResty同步非阻塞的基本要求，调用的时候会把当前请求挂起，并把网络事件的回调注册给Nginx
-    
+
     仔细阅读这个的文档之后可以回答我上个月遇到的很多问题，比如connect的时候调用的是nginx配置的resolver，连接建立之后需要手动sslhandshake等。当然最重要的还是遇到问题知道来哪里查，以及网络基础要打好，这个也是后面学习的重点。
     
     lua-resty-core
     ====
     
     这个是OpenResty在某个版本后默认开启的模块，原理是改用了[luajit ffi](http://luajit.org/ext_ffi_api.html)去进行实现，而不是lua c function，这两者最主要的区别是lua ffi可以被Jit追踪优化，但是lua c function不行
-    
+
     lua c function感觉主要缺陷是c和lua之间的返回值无法直接交换，比如返回值添加一个字符串需要c那边调用`lua_pushlstring(L, (char *) res, res.len)`把一个指定大小的字符串压到Lua的虚拟栈里。这个和之前做前端时候的tolua感觉挺像的，或者说跨语言交互原理上就是一样的。
     
     两者对比的优缺点还是很显然的，ffi是Jit提供的，很显然可以被Jit优化，而且写起来更简单，不用去栈里把返回值扣出来。但缺点是这个内存在某些情况下要你自己管理，如果是Lua C Function，那因为这个栈在Lua这边，所以GC一下没引用就没了。但是ffi的内存并不全是Lua管理的，也就是`ffi.new`返回的是cdata，这部分是LuaJit管理，`ffi.C.malloc`这样就是申请了一块C内存，需要`local p = ffi.gc(ffi.C.malloc(n), ffi.C.free)`，给他注册一个gc回调，p = nil的时候这个就被释放了。这样其实也有个好处，他可以突破OpenResty对Lua Vm 2G内存的限制
@@ -268,10 +264,9 @@
     这种就比较简陋，但也能用，也满足我们reload worker的时候清空的需求。
     
     cache的话OpenResty主要提供两种，`ngx.shared.dict` 和`resty.lrucache` ,主要区别是dict是跨worker共享的，lrucache是单worker的数据。这两个就不会被reload干掉，放在我们项目，shared dict有网关或者token的应用场景，lrucache暂时没有
-
-
-​    
-​    
+    
+    
+    
     压力测试和火焰图
     ====
     
@@ -296,7 +291,7 @@
     
       Numeric arguments may include a SI unit (1k, 1M, 1G)
       Time arguments may include a time unit (2s, 2m, 2h)
-    
+
     ```
     
     c，d，t之类的都比较好理解，主要看这个-s，有几个操作
@@ -316,9 +311,8 @@
     
     -- 测试全部结束，可以自己处理一下结果
     function done(summary, latency, requests)
-
-
-​    
+    
+    
     -- 全局表
     wrk = {
         scheme  = "http",
@@ -350,7 +344,7 @@
     end
     ```
     上面就用wrk给我们战斗服发了一堆相同的战斗。实际应用中我们暂时用不到压力测试，一般都是火焰图看看是哪个函数，继而优化。
-    
+
     我一般找到性能瓶颈之后，优化具体的接口我都是用[test](#test) 模块的办法自己写个command脚本，判断一下是否优化成功。wrk可以当成一个工具技能，先留着，相信早晚一天有用
     
     火焰图
@@ -373,138 +367,9 @@
     #scp或者ftp之类的把这个a.svg换个名字发出去，放到网页上大家就都能看了
     ```
     
-    ngx_timer
-    ====
-    
-    ngx_timer是用来定时启动一个子任务的方法，业务逻辑一般用他做一些批量提交或者异步处理的行为
-    
-    这个东西本身用起来很简单，就ngx.timer.at(t, func)就行，但是真的到了线上，还是会遇到一些问题，这里总结一下
-    
-    1. 数量超过限制
-    	线上我们的lua server，lua_max_pending_timers和lua_max_running_timers 在nginx.conf里当然配置的比较大(8192,4096),但是还有一种情况，在定时器脚本中，timer的数量并不受nginx.conf控制，还是默认的1024，也就导致我们跑结算脚本的时候触发了"worker connections not enough"的bug，丢失了一部分数据。我借鉴其他人的做法重新封装了脚本里的timer，并把项目里的所有ngx.timer替换为封装的timer
-    	```lua
-    	local timer = ngx.timer
-    	function _M:get_alive_count()
-        	local base_count = timer.pending_count() + timer.running_count()
-        	return base_count + (setting:is_running_script() and 1 or 0)
-    	end
-    
-    	function _M:base_timer_at(time, callback, ...)
-        	if (tonumber(time) or 0) < 0 or
-            	(setting:is_running_script() and self:get_alive_count() > 128)
-            	then
-            	callback(0, ...)
-            	return
-        	end
-        	local _, err1 = timer.at(time, callback, ...)
-        	if err1 ~= nil then
-            	local _, err = timer.at(0, callback, ...)
-            	if err ~= nil then
-                	callback(0, ...)
-                	print("create ngx.timer.at failed. err:", err)
-            	end
-        	end
-    	end
-    
-    	```
-    	
-    	就是脚本的情况下使用ngx.timer.pending_count() + ngx.timer.running_count() 获取当前运行的timer数量，如果超过128，则直接执行回调。
-    
-    2. 上下文问题
-    	timer的ngx.ctx并不继承原本的请求，结束的时候也不会走到我们一个请求固定的逻辑（比如keepalive, 推送给玩家信息，记录日志等）
-    	所以把上面接口又封装了一层，涉及比较多业务代码，这边就先略去了，原理就是把ngx ctx clone一份，然后二次封装一下timer，让他真正的像一个请求
-    
-    
-    resty-mysql
-    ====
-    项目里，是直接new一个resty.mysql实例，作为请求级别的mysql使用，主要调用query/send_query接口，请求结束还会调用keepalive放入连接池
-    
-    在某天更新版本之后，线上有个表再也没有数据新增了，没有任何报错，内网是可以复现的，这种BUG都比较容易检查
-    
-    内网增加了一些打印，发现query的时候错误没有处理，err 本身是"cannot send query in the current context"
-    
-    源码看一下马上就找到问题了。
-    ```lua
-    local function send_query(self, query)
-        if self.state ~= STATE_CONNECTED then
-            return nil, "cannot send query in the current context: "
-                        .. (self.state or "nil")
-        end
-    
-    ```
-    然后看了一下，resty mysql send的时候如果当前连接建立了且发送了请求，但没有读完，则会直接return。
-    所以是有人调用了他的send_query接口，但是没有调用read_result把结果读完，导致这个请求的后续sql全都不能正常执行了
-    
-    项目轻度使用mysql，以前没有出过问题，现在战报往两个数据库存，就原形毕露了。
-    改有两种改法，一种是把连接的建立改为command级别，在外面再封装一层
-    ```lua
-    local resty_mysql = require 'resty.mysql'
-    function _M:query(...)
-    	-- resty mysql connect
-    	-- resty mysql query
-    	-- resty mysql keepalive
-    end
-    
-    function _M:send_query(...)
-    	-- resty mysql connect
-    	-- resty mysql query
-    	-- resty mysql close
-    end
-    ```
-    send_query直接关闭连接，或者读完也可以，读完就等价于query。这种做法看似优雅，实际上测试成本很高，不适合项目做到一半换
-    
-    另一种比较暴力，我也是选的这一种
-    ```lua
-    function _M.query(self, query, est_nrows)
-        local bytes, err = send_query(self, query)
-        if not bytes then
-            return nil, "failed to send query: " .. err
-        end
-    
-        local res, err1 = read_result(self, est_nrows)
-        if not res or err1 then
-            --ngx.log(ngx.ERR, "[Mysql error %s] %s", self.sock and self.sock[3] or "-", tostring(err1))
-            local function log_err()
-                local logger = require 'framework.log.base_logger'
-                logger.error(string.format("[Mysql error %s] err: %s\nquery: %s",
-                        tostring(self.sock and self.sock[3] or '-'), tostring(err1), tostring(query)
-                    )
-                )
-            end
-            local result = nil
-            if err1 and err1 == "again" then
-                result = {res}
-                while err1 == "again" do
-                    local t_res
-                    t_res, err1 = read_result(self, est_nrows)
-                    if not t_res then
-                        log_err()
-                        return nil, err1
-                    end
-                    table.insert(result, t_res)
-                end
-            else
-                log_err()
-            end
-            return result, err1
-        else
-            return res, err1
-        end
-    end
-    
-    function _M.send_query(...)
-        return _M.query(...)
-    end
-    
-    ```
-    没错，我直接把resty.mysql的query接口改了，并且send_query直接定义等于query，因为我还是想复用连接，既然send也要读完，我干脆直接query就好了
-    还顺手封装了一下query的 error="again"这种情况
-    
-    
-    
     LuaGC
     ====
-    
+
     最近开了个坑，起因是因为我在自以为已经对Lua比较了解的情况下，看了一篇关于Lua GC的介绍 [Lua GC算法并行化探讨](https://zhuanlan.zhihu.com/p/564165613), 看完觉得我对力量一无所知，决定开始整理一下Lua GC的原始算法，改进后的三色GC（包括如何实现增量GC，这个是以前没有认真看过的），以及文章中提到的并行化思路。
     
     双色标记
@@ -514,7 +379,7 @@
     
     1. 从根节点（GC ROOT）出发，扫描所有节点，对于可以通过引用链找到的对象标记为可达（黑色），没有的就是垃圾（白色）
     2. 从全局的需要GC的对象链表里面，把刚才没扫描到的都删除
-    
+
     原理看上去简单，但是有些概念需要思考和验证，下面介绍三色GC的时候一起看
     
     缺点很明显，这个过程不可能被打断，不然假设中间new出来的都是白的，就被直接回收了；假设中间new出来是黑的，这个黑的里面有个指向白色的引用，那你把白的干掉了，黑的里面就多了个野指针，对应到Lua侧的使用就是你 `if a.b then print(type(a.b)) end` 能打出个nil来，这样根本就不能用了，所以也是不行的。
@@ -522,7 +387,7 @@
     所以为了保证正确性，双色GC不可被打断。
     
     所以这种做法必须是同步阻塞地执行，也就是传说中的STW（stop the world）回收，这个时候主线程在GC结束之前就不能继续干别的事情了，从用户侧看起来就是游戏卡了。
-    
+
     三色标记
     ====
     
@@ -579,9 +444,9 @@
     看到主要是两步操作，对于新Obj B，假设他被黑色节点A引用，那存在两种可行的标记操作
     1. 改变B，也就是barrier fwd，新对象设置为灰色，等待GC算法遍历，相当于前进一步，Lua表之外的对象走的是这个。
     2. 改变A，也就是barrier back，引用到他的设置为灰色，意味着这一轮还要再遍历一次，相当于倒退一步，这个只对Lua table使用。
-    
+
     fwd其实很好理解，主要看看back，以及分析一下为什么特殊对待Lua Table
-    
+
     ```c
     void luaC_barrierback (lua_State *L, Table *t) {
       global_State *g = G(L);
@@ -593,11 +458,10 @@
       g->grayagain = o;
     }
     ```
+    
+    
 
-
-​    
-
-
+    
     redis
     ====
     
@@ -756,7 +620,7 @@
         sds copy = sdsdup(key->ptr);
         ...
     }
-    
+
     ```
     
     Redis Server读取client的请求的时候，会先读如缓冲区，这个缓冲区也是SDS
@@ -964,7 +828,7 @@
     
     ziplist
     ====
-    
+
     redis 部分底层结构是用ziplist来节约空间的，hash元素较少，zset元素较少的时候，均会使用ziplist的底层结构，ziplist底层上是一整块连续的内存。每个元素都会保存上一个元素的大小（并且采用尽量短的数据类型保存），当前项的编码，以及当前项的具体数据，也就是
     ```c
     typedef struct zlentry {
@@ -973,7 +837,7 @@
         unsigned int prevrawlen;
         unsigned int lensize;
         unsigned int len;
-    
+
         unsigned int headersize;     /* prevrawlensize + lensize. */
         unsigned char encoding;      /* ZIP_STR_* or ZIP_INT_* */
         unsigned char *p;
@@ -981,7 +845,7 @@
     ```
     整个ziplist是<zlbytes> <zltail> <zllen> <entry> <entry> ... <entry> <zlend>
     ziplist有一些性能问题，主要看insert函数
-    
+
     ```c
     unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen) {
         size_t curlen = intrev32ifbe(ZIPLIST_BYTES(zl)), reqlen, newlen;
@@ -1011,7 +875,7 @@
         zl = ziplistResize(zl,newlen);
     
         .. // 申请这次的空间
-    
+
         // 检查是不是要连锁更新
         if (nextdiff != 0) {
             offset = p-zl;
@@ -1023,17 +887,17 @@
         return zl;
     }
     ```
-    
+
     连锁更新主要是后面节点的prelensize不足以保存现在的大小，发生的时候，需要给下一个更多的空间保存，给下一个更多的空间会导致下一个增大，就需要修改下下个的prevlen，如果也不足以表示，就会继续扩充，一直到最后。这种发生的概率并不大，应该只有所有数据都很临界的时候，插入了一个比临界大的，出现这种情况。但是ziplist本身的问题不止有极端情况下连锁更新导致的频繁内存操作，还有一个问题就是他的查询也是链式的。所以上层结构hash和zset会定一个使用ziplist的最大大小，避免太大导致效率大打折扣。
     
     针对这些问题，redis对ziplist提出了两种优化，quicklist和listpack，分别应用于list和stream等结构
-    
+
     quicklist
     ====
-    
+
     quicklist简单来说就是一堆ziplist连起来 z1<->z2<->z3<->...<->zn
     他设计出来主要是解决ziplist访问效率问题
-    
+
     ```c
     typedef struct quicklistNode {
         struct quicklistNode *prev;     //前一个quicklistNode
@@ -1047,7 +911,7 @@
         unsigned int attempted_compress : 1; //数据能否被压缩
         unsigned int extra : 10; //预留的bit位
     } quicklistNode;
-    
+
     typedef struct quicklist {
         quicklistNode *head;      //quicklist的链表头
         quicklistNode *tail;      //quicklist的链表尾
@@ -1077,9 +941,9 @@
     ```
     判断能否插入的函数allowInsert，他会计算新插入元素后的大小（new_sz），这个大小等于 quicklistNode 的当前大小（node->sz）、插入元素的大小（sz），以及插入元素后 ziplist 的 prevlen 占用大小
     然后判断元素个数是不是满足要求,总大小是否满足要求
-    
+
     ```c
-    
+
     // 8196
     #define sizeMeetsSafetyLimit(sz) ((sz) <= SIZE_SAFETY_LIMIT)
     
@@ -1103,18 +967,17 @@
             return 0;
     }
     ```
-    
+
     另外这里看到redis虽然是内存友好，但是CPU方面也有做很多优化，比如用likely和unlikely进行分支预测
 
 
 
-
+    
     listpack
     ====
     stream项目里基本没用，这个结构就没怎么仔细看了
-
-
-​    
+    
+    
     skiplist
     ====
     
@@ -1179,26 +1042,26 @@
         return x;
     }
     ```
-    
+
     redis-multi-thread
     ====
     
     redis经常被说是单线程模型，但其实这个说法并不正确。通过阅读redis的源码发现，redis其实只是在“处理客户端请求”这一块是单线程的。
-    
+
     后台来看，redis很早就支持多线程了，通过bio，redis关闭文件，fsync aof日志，lazyfree 字典之类的对象使用的内存，都是通过创建一个bio任务，另起一个线程做的。这里是生产者消费者模型，生产者提交任务，消费者不停轮询这个任务队列
     
     这个主要是为了避免耗时的操作影响主线程，比如aof写入磁盘，如果在主线程中，那磁盘操作就成了性能瓶颈，肯定会严重影响redis的效率。
 
 
     前台来看，redis 在6.0之后（可惜我们项目并没有使用），从单Reactor单线程模式变成了单Reactor多线程模式，用来维护客户端的socket连接。
-    
+
     redis-bio
     ====
-    
+
     后台任务都是通过bio.c建立的，主要是通过`bioSubmitJob` 进行创建，通过`bioProcessBackgroundJobs` 进行消费
-    
+
     bio init在redis server的`initServer` 之后，可以看到main中的顺序是先`initServer` 再 `initServerLast`，在这个last里调用了`bioInit` ，初始化了后台的任务队列
-    
+
     bioinit:
     ```c
     void bioInit(void) {
@@ -1226,13 +1089,13 @@
         }
     }
     ```
-    
+
     主要就是做了几件准备工作，这里可以看到，他根据BIO_NUM_OPS，每种后台OP，创建一个任务链表，记录等待数量的数组。并且初始化每种任务的锁和两种条件变量。
-    
+
     计算子线程大小这个是避免在一些系统下栈太小
-    
+
     再调用pthread_create，创建子线程，并指定函数入口bioProcessBackgroundJobs，arg是他的编号，上面提到的三种后台OP类型
-    
+
     这里执行完，就起了三个后台任务的消费者，每种消费者消费一种类型的后台任务
 
 
@@ -1245,38 +1108,38 @@
         // 比如在redis.conf里增加bio_cpulist 1,3
         redisSetCpuAffinity(server.bio_cpulist);
         makeThreadKillable();
-    
+
         // 先对线程加锁
         pthread_mutex_lock(&bio_mutex[type]);
-    
+
         // 初始化信号屏蔽集合，只处理自己想要的信号
         sigemptyset(&sigset);
         sigaddset(&sigset, SIGALRM);
         if (pthread_sigmask(SIG_BLOCK, &sigset, NULL))
             serverLog(LL_WARNING,
                 "Warning: can't mask SIGALRM in bio.c thread: %s", strerror(errno));
-    
+
         while(1) {
             listNode *ln;
-    
+
             // 这边注册一个条件变量,等待被后台任务，上面先锁定了，进来对时候总是先进入阻塞等待, 有newjob的时候会唤醒
             if (listLength(bio_jobs[type]) == 0) {
                 pthread_cond_wait(&bio_newjob_cond[type],&bio_mutex[type]);
                 continue;
             }
-    
+
             // 拿出一个任务, 给线程解锁
             ln = listFirst(bio_jobs[type]);
             job = ln->value;
             pthread_mutex_unlock(&bio_mutex[type]);
-    
+
             //每种任务类型的执行函数写在这里
             // 省略三个ifelse
             ...
-    
+
             //释放任务本身
             zfree(job);
-    
+
             // 锁上，给完成数量-1，列表node-1
             pthread_mutex_lock(&bio_mutex[type]);
             listDelNode(bio_jobs[type],ln);
@@ -1285,11 +1148,11 @@
             pthread_cond_broadcast(&bio_step_cond[type]);
         }
     ```
-    
+
     step_cond只是被设计出来，源码里还没找到在哪用过，应该是没有用过的。
-    
+
     所以这个逻辑就变成了，线程cond_wait这个newjob类型的条件量，有的话拿出来根据job的类型处理一下
-    
+
     这里是提交job的时候
     ```c
         void bioSubmitJob(int type, bio_job *job) {
@@ -1301,32 +1164,32 @@
             pthread_mutex_unlock(&bio_mutex[type]);
         }
     ```
-    
+
     所有后台任务都是通过调用这个submitjob接口创建的，创建之后会唤醒对应type的后台线程，异步的处理上面说的三种工作
-    
+
     redis后台任务线程用了大量的锁操作，对这块并不熟悉，看起来有点吃力。但是忽略锁的操作，就是比较简单的工作模式了。
-    
+
     redis-reactor
     ====
     
     redis的reactor模式在6.0版本前后有所不同，我们项目是redis是5.x的版本，所以用不上6.0以后的io特性
-    
+
     [reactor的教材放一下](https://gee.cs.oswego.edu/dl/cpjslides/nio.pdf)
-    
+
     6.0之前，redis是单Reactor单线程模式，也就是accept->read->handler->write
-    
+
     6.0之后，redis是单Reactor多线程模式，也就是handler扔到了别的线程
-    
+
     但本质上都还是io多路复用，看下redis里面的事件循环EventLoop
-    
+
     注意只有io多路复用在6.0之后是多线程Reactor模式，io拿进输入区缓存之后是顺序执行的，还是只有一个线程在处理客户端请求
-    
+
     不是说有若干个handler在处理客户端请求，只是写入缓冲区而已。
-    
+
     - 事件的定义
-    
+
     redis中有IO事件和时间事件两种基本事件，对应了aeFileEvent和aeTimeEvent，在ae.h中，看一下aeFileEvent
-    
+
     ```c
     typedef struct aeFileEvent {
         int mask; /* one of AE_(READABLE|WRITABLE|BARRIER) */
@@ -1335,15 +1198,15 @@
         void *clientData;
     } aeFileEvent;
     ```
-    
+
     mask是用来区分哪一种FileEvent， timeEvent则是使用id来进行区分
-    
+
     这里看到mask是AE_(READABLE|WRITABLE|BARRIER)这三种事件，可读，可写，和反转读写事件（不知道这么翻译是否有失准确）
-    
+
     可读，可写，是客户端连过来socket的状态，和正常socket的可读可写没有区别
-    
+
     主要看看这个AE_BARRIER，这个类型的事件会先写再读，不带这个mask则是先读再写
-    
+
     这个在networking.c（和客户端交互部分）有
     ```c
     if (server.aof_state == AOF_ON &&
@@ -1352,17 +1215,17 @@
         ae_barrier = 1;
     }
     ```
-    
+
     可以看到，AOF在写的时候，redis出于希望数据快速落盘的考虑，会启用这个标志，这样就是先写数据库，再写socket，这个后续会写一下事件循环的细节，这里继续介绍event结构
-    
+
     aeFileProc类型的两个回调函数分别对应了读和写，在事件循环里拿到读事件调用读的回调，写调写的
-    
+
     clientData很好理解，他指向客户端的私有数据
-    
+
     - 事件循环主循环
-    
+
     这部分代码在aeMain中，他长得就像这样
-    
+
     ```c
     void aeMain(aeEventLoop *eventLoop) {
         eventLoop->stop = 0;
@@ -1372,9 +1235,9 @@
         }
     }
     ```
-    
+
     调用的时候是
-    
+
     ```c
     int main()
     {
@@ -1386,24 +1249,24 @@
         return 0;
     }
     ```
-    
+
     这个是main函数最下面几行，可以看到，aeMain是redis server全部准备就绪之后，直接起起来的，整个redis的核心也就是这个事件循环，它在主线程里面阻塞，不断的调用
     aeProcessEvent，处理事件循环中的事件
-    
+
     这里已经调用aeMain进行事件循环了，准备工作在initServer中`server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);`,这里要分配内存空间，创建多路复用的实例,把多路复用实例的引用存到事件循环实例中。
 
 
 
     redis的主循环就是这个事件循环，接下来看看事件循环的每一步
-    
+
     - 单步的事件循环
-    
+
     ```c
     //flag用来判断执行哪种事件
     int aeProcessEvents(aeEventLoop *eventLoop, int flags)
     {
         int processed = 0, numevents;
-    
+
         // 没有可以执行的
         if (!(flags & AE_TIME_EVENTS) && !(flags & AE_FILE_EVENTS)) return 0;
     
@@ -1465,13 +1328,13 @@
         return processed;
     }
     ```
-    
+
     整个流程大概是这样的，就是调用多路复用api，获取就绪的文件事件，执行，再处理TimeEvents。下面分别介绍一下两种事件的定义，注册，执行
-    
+
     - IO事件
-    
+
     创建: 主要是在事件循环和多路复用api中分别注册，并绑定对应的回调函数和数据
-    
+
     ```c
     int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask, aeFileProc *proc, void *clientData){
         //根据文件描述符，尝试新建/取出一个io事件，并注册到多路复用api
@@ -1488,11 +1351,11 @@
             eventLoop->maxfd = fd;
     }
     ```
-    
+
     在redis initServer阶段，他会注册TCP连接的IO事件，并绑定对应回调函数为`acceptTcpHandler`
-    
+
     `createSocketAcceptHandler(&server.ipfd, acceptTcpHandler) `
-    
+
     ```c
     int createSocketAcceptHandler(socketFds *sfd, aeFileProc *accept_handler) {
         int j;
@@ -1506,15 +1369,15 @@
         return C_OK;
     }
     ```
-    
+
     这样在起server的时候，就确定了处理TCP IO事件的回调函数，同样也会注册其他模块的回调函数。
-    
+
     这个回调函数是绑定到redis的监听端口ipfd的，也就是客户端的连接请求都会走这个accectTcpHandler回调, 对应了Reactor模式的accepter
-    
+
     ```c
     void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
         ...
-    
+
         while(max--) {
             //试图创建一个socket连接，返回这个连接的socket文件描述符
             cfd = anetTcpAccept(server.neterr, fd, cip, sizeof(cip), &cport);
@@ -1526,7 +1389,7 @@
             acceptCommonHandler(connCreateAcceptedSocket(cfd),0,cip);
         }
     }
-    
+
     static void acceptCommonHandler(connection *conn, int flags, char *ip) {
         ... 
         ...
@@ -1550,9 +1413,9 @@
             return;
         }
     }
-    
+
     ```
-    
+
     这里面有个重要的函数createClient，里面主要是
     ```c
         connEnableTcpNoDelay(conn);
@@ -1561,35 +1424,35 @@
         connSetReadHandler(conn, readQueryFromClient);
         connSetPrivateData(conn, c);
     ```
-    
+
     这里的connEnableTcpNoDelay(conn);允许了TCP小包发送
     connKeepAlive维护长连接
     connSetReadHandler相当于把读的回调绑定给了这个`readQueryFromClient`函数
     connSetPrivateData保存这个连接的数据
-    
+
     所以看到了这里，IO读事件的回调，就是这个`readQueryFromClient`
     它主要是把指令读到缓冲区buffer中
-    
+
     `readQueryFromClient` -> `processInputBufferAndReplicate` -> `processInputBuffer` -> `processCommand` -> `addApply`
-    
+
     这个缓冲区，会被前面提到的beforeSleep通过调用`handleClientsWithPendingWrites`写回客户端，他一样会调用aeCreateFileEvent，但他创建的是一个可写事件
-    
+
     相当于客户端过来可读，回去可写。可读可写都是基于redis机器而言的。
-    
+
     这样一个请求进来的时候，完整的有
     建立连接 -> 调用accecpt函数，注册到事件循环并绑定事件循环的回调readQueryFromClient -----> 客户端数据来了调用回调函数写入缓冲区 -> 处理逻辑 -> 写到缓冲区，标记连接socket为可写
-    
+
     这样redis就把客户端输入用多路复用的方式高效的拿到了缓冲区并处理，如果操作比较慢，有命令卡在缓冲区，那么beforeSleep的时候会调用
     `processUnblockedClients`, 这个最终会调用`processCommand`拿出缓冲区的指令并处理
 
 
     - 时间事件
-    
+
     这个内容少一些，类比上面，initServer的时候他一样注册了
     `aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL)`
-    
+
     他就是每个周期都会执行的定时任务，里面主要是这几个
-    
+
     ```c
     // 检查是不是关闭
     if (server.shutdown_asap) { if (prepareForShutdown(SHUTDOWN_NOFLAGS) == C_OK) exit(0); ... }
@@ -1598,28 +1461,28 @@
     // 后台操作，比如删除过期key之类的
     databaseCron();
     ```
-    
+
     上面aeProcessEvents里面讲了每次循环都会检查时间列表有没有可以执行的时间事件，拿出来执行一下。
-    
+
     注意这个时间事件都是在主线程执行的（因为是aeMain的循环里每一步都会调用）
-    
+
     所以删除key(对应databasecron里面的activeExpireCycle)等操作是可能阻塞主线程的操作
-    
+
     redis-persist-datas
     ====
-    
+
     redis 有rdb和aof两种方式持久化数据，rdb是类似于生成快照的方式，aof则是基于指令
-    
+
     目前项目里是aof的方式，策略是everysec，每天11点重写aof
-    
+
     redis-rdb
     ====
-    
+
     redis-aof
     ====
-    
+
     - aof写入
-    
+
     aof 如果开启，流程就分为三步，首先看processCommand最终调用到的call函数
     ```c
     void call(client *c, int flags) {
@@ -1635,7 +1498,7 @@
         afterCommand(c);
         ...
     }
-    
+
     void afterCommand(client *c) {
         UNUSED(c);
         if (!server.in_nested_call) {
@@ -1645,12 +1508,12 @@
             trackingHandlePendingKeyInvalidations();
         }
     }
-    
+
     void propagatePendingCommands() {
         ...
         调用propagateNow
     }
-    
+
     static void propagateNow(int dbid, robj **argv, int argc, int target) {
         if (!shouldPropagate(target))
             return;
@@ -1661,13 +1524,13 @@
             replicationFeedSlaves(server.slaves,dbid,argv,argc);
     }
     ```
-    
+
     所以指令正常运行结束后，redis会根据配置，最终调用feedAppendOnlyFile进行AOF文件的写入server.aof_buf
-    
+
     最后serverCron会调用flushAppendOnlyFile，尝试真的写入aof文件（always直接写入，everysec会判断时间是否满足）
-    
+
     flushAppendOnlyFile如果判断需要同步aof文件，会走到try_fsync分支，主要看这个分支
-    
+
     ```c
     try_fsync:
         if (server.aof_no_fsync_on_rewrite && hasActiveChildProcess())
@@ -1689,28 +1552,28 @@
             server.aof_last_fsync = server.unixtime;
     }
     ```
-    
+
     ALWAYS的分支说明开了always每次都会真的落盘，所以这个是不开的，不然还不如直接用mysql，EVERY_SEC起后台线程，会用上面的bio做，提交一个bio的task，异步写入aof文件
-    
+
     注意aof是先操作，再写aof，这个应该是为了避免用aof恢复数据或重写的时候拿出错误的指令
-    
+
     - aof 重写
-    
+
     aof一条条的插入，就会太大，所以需要定时重写，比如
     sadd lunlun gay
     sadd lunlun gaygay
-    
+
     可以重写成
     sadd lunlun gay gaygay
-    
+
     1. aof什么时候会重写
-    
+
     aof的重写，最终都是调用rewriteAppendOnlyFileBackground实现的，这个函数里会执行fork等一系列操作。
-    
+
     一共4个地方调用了这个函数
-    
+
         - serverCron中，如果满足`if (!hasActiveChildProcess() && server.aof_rewrite_scheduled && !aofRewriteLimited())`, 则会执行。也就是有人设置了他到定时检查的任务里，这里就是说，如果aof重写命令来了，但是还有子进程在运行之类的，比如rdb在生成或者adb在重写，那就会等，设置一个flag，能执行了就立刻执行了
-    
+
         - serverCron中，如果aof文件增长超过设定值，也会触发被动重写
             ```c
                 if (server.aof_state == AOF_ON &&
@@ -1727,15 +1590,15 @@
                     }
                 }
             ```
-    
+
         - startAppendOnly函数，也就是通过config把appendOnly配置进去，这个从关闭到打开的瞬间会立刻触发重写或者加入调度队列, 或者restartAOFAfterSYNC，它会在主从节点的复制过程中被调用
-    
+
         - bgrewriteaofCommand，用户手动调用，如果满足条件（没有子进程, aof开启等）会立刻重写或者加入调度队列
-    
+
     2. aof 重写的时候有哪些操作
-    
+
     aof重写最终都会调用rewriteAppendOnlyFileBackground函数
-    
+
     ```c
     int rewriteAppendOnlyFileBackground(void) {
         ...
@@ -1762,9 +1625,9 @@
         return C_OK; /* unreached */
     }
     ```
-    
+
     可以看到他创建了子进程之后，子进程调用rewriteAppendOnlyFile，开始真正的重写。父进程则重置重写任务的状态，并记录一个开始时间
-    
+
     rewriteAppendOnlyFile会调用rewriteAppendOnlyFileRio，执行真正的重写逻辑.
     ```c
     int rewriteAppendOnlyFileRio(rio *aof) {
@@ -1827,9 +1690,9 @@
         ...
     }
     ```
-    
+
     redis给每个数据类型，都指定了一个写入的方案。以list为例：
-    
+
     ```c
     int rewriteListObject(rio *r, robj *key, robj *o) {
         long long count = 0, items = listTypeLength(o);
@@ -1878,33 +1741,33 @@
         return 1;
     }
     ```
-    
+
     可以看到实际的重写，分为几步，先讨论编码，再根据编码把多条命令整合成一条。
-    
+
     如果一条命令太长，则会拆分成多条。
-    
+
     为什么拆分成多条呢，原因是redis启动的时候，如果要根据aof恢复数据，他的做法是创建一个假的客户端写入，那他走客户端写入，就要走缓冲区那一套逻辑，指令太长会缓冲区过大.
 
 
     3. 重写的时候和父进程交互
-    
+
     - 7.0 之前：
     aof重写和父进程的交互有这么几个地方
-    
+
     第一，aof重写是一个后台进程，那redis父进程肯定还是要处理客户端请求的，这样就面临一个问题，重写要进行一段时间，这段时间还会把这段时间的指令appendAof
-    
+
     那你新的aof重写完，必然要回来替换原本的aof文件，重写这段时间的aof肯定不能让他丢失，在7.0之前redis启用multiAOF这个设计之前，父进程都要想办法把这段时间的aof数据发给子进程，让子进程也写入aof
-    
+
     这里就需要子进程和父进程交互，父进程通过一定的机制把缓存的指令发送给子进程
-    
+
     第二，aof重写结束后，怎么告诉父进程他已经ok了
-    
+
     第三，父进程要通知子进程他收到了，可以清理一些资源了。
-    
+
     redis为了实现这几种父子进程通信，采用了创建了管道的方法进行父子进程通信
-    
+
     每次调用rewriteAppendOnlyFileBackground，实际上会调用redisFork方法
-    
+
     ```c
     int redisFork() {
         ...
@@ -1918,7 +1781,7 @@
     }
     ```
     openChildInfoPipe实际上就建立了一个管道，他会调用`anetPipe(server.child_info_pipe, O_NONBLOCK, 0)`，最终调用pipe去创建管道。
-    
+
     anetpipe创建管道并标记是写还是读，并且根据传入的O_NONBLOCK，把管道设置为非阻塞
     ```c
     int anetPipe(int fds[2], int read_flags, int write_flags) {
@@ -1947,20 +1810,20 @@
         return -1;
     }
     ```
-    
+
     子进程aof重写完之后，会给父进程发送`write(server.aof_pipe_write_ack_to_parent,"!",1)`，让父进程停止重写。
-    
+
     - 7.0之后
-    
+
     在serverCron里轮询，每次调用checkChildrenDone，里面调用waitpid，判断子进程是否完成，完成了调用backgroundRewriteDoneHandler更新manifest和进行其他清理工作。
 
 
     4. 重写时，新aof缓冲区的更新策略
-    
+
     在相当一段时间里，redis重写的时候都是用一个无名管道进行父子进程通信，父进程循环把新增的aof写入，子进程rewrite的时候读取到管道里的信息则取出，写入到新aof中
-    
+
     7.0的版本里，redis提出了Multi Part AOF(MP-AOF)，接下来分别分析两种方式（因为我们项目是5.x版本的redis，是上面那种，但是新的这种有很大优点，需要对比学习）
-    
+
     - 老rewrite的aof写入工作流程：
         
         从父进程调用`fork()`开始，redis-server中就会存在两份缓存数据，从[51cto](https://www.51cto.com/article/701106.html)找了一张图直观的表明这个流程
@@ -1969,7 +1832,7 @@
     也就是他会同事存在一个aof_rewrite_buf和aof_buf，aof_rewrite_buf的内容会被写入管道和子进程通信（写入子进程要写的那个aof文件）。
     
     子进程aof写完之后，子进程发给父进程一个信号，父进程把子进程写的aof文件原子替换掉自己的，完成整个过程。
-    
+
     大致流程是这样的，看看代码。fork的部分基本一样，但是他是有个6长度的数组，也就是3个管道，标记为非阻塞，并调用aeCreateFileEvent，加入可读事件
     ```c
     int aofCreatePipes(void) {
@@ -1980,7 +1843,7 @@
         …
     }
     ```
-    
+
     而后全局保存这些管道
     ```c
     int aofCreatePipes(void) {
@@ -1997,15 +1860,15 @@
         …
     }
     ```
-    
+
     feedAppendOnlyFile 函数在执行的最后一步，会判断当前是否有 AOF 重写子进程在运行。如果有的话，它就会调用 aofRewriteBufferAppend 函数，将参数 buf，追加写到全局变量 server 的 aof_rewrite_buf_blocks 这个列表中
     ```c
     if (server.aof_child_pid != -1)
         aofRewriteBufferAppend((unsigned char*)buf,sdslen(buf));
     ```
-    
+
     parent的管道上绑定的回调是`aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child, AE_WRITABLE, aofChildWriteDiffData, NULL);`
-    
+
     ```c
     void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
         ...
@@ -2018,13 +1881,13 @@
         ...
     }
     ```
-    
+
     这样我们就知道，有正在重写的aof进程的情况下，7.0之前的redis，通过增加可写事件的方式，最终调用aofChildWriteDiffData，将buf数据写入管道中。
-    
+
     子进程调用aofReadDiffFromParent，从管道读出数据，保存在全局缓存里`read(server.aof_pipe_read_data_from_parent,buf,sizeof(buf))`
-    
+
     重写完成后，子进程则会调用`write(server.aof_pipe_write_ack_to_parent,"!",1)`，向父进程写入"!"，父进程写会一个"!"，这样他们就完成了结束的双向确认
-    
+
     ```c
     void aofChildPipeReadable(aeEventLoop *el, int fd, void *privdata, int mask) {
         ...
@@ -2035,40 +1898,40 @@
         ...
     }
     ```
-    
+
     到这里相互确认完，老版本的aof重写就完全完成了
-    
+
     - 7.0 之后的manifest管理（Multi Part AOF）
-    
+
     主要是有三种AOF版本，base，incr，history
-    
+
     重写的时候新的指令是往新incr写的，重写的base替换以前的，以前的base和所有incr命名成history，最终被清理
-    
+
     保留的是新base和新base rewrite期间写的incr
-    
+
     用aof重构的时候是base->incr1->incr...->incrn
-    
+
     也去偷了一张图
 
 
     ![](assets/16608906119529.jpg)
-    
+
     流程和上面描述的基本一致。
-    
+
     `feedAppendOnlyFile`中已经没有了对是否有正在进行的子进程的判断，因为现在是共用一个buf
-    
+
     往哪个aof写入，则是靠`server.aof_fd`这个全局的文件描述符区分的
-    
+
     ```c
     void flushAppendOnlyFile(...){
         nwritten = aofWrite(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
     }
     ```
-    
+
     rewriteBackground的时候，调用`openNewIncrAofForAppend`
     
     这个函数创建一个新的aof文件，这个函数会检查当前的AOF重写状态
-    
+
     ```c
     int rewriteAppendOnlyFileBackground(void) {
         pid_t childpid;
@@ -2147,47 +2010,47 @@
         return C_ERR;
     }
     ```
-    
+
     这块看的并不细，因为项目里暂时还没用到。但是原理大概是这样的。
-    
+
     最终还是rewriteDone函数中，替换文件，更新manifest状态
-    
+
     这样做的好处
-    
+
         - 内存节约，省去了aof_rewrite_buf 这个结构，重写的时候没有使用多余的内存
-    
+
         - 节约CPU资源，老版本相当于写两份，他写一份。不用往管道里写入，也节约了一些磁盘IO
-    
+
     redis-replica
     ====
-    
+
     redis主从复制有四个阶段：
     1. 从节点server初始化
         
         从节点在被设置为从节点的时候，会触发初始化操作。具体有下面几种：
         
         - 执行replicaof masterip masterport
-    
+
         - conf文件中指定replicaof masterip masterport
-    
+
         - redis-server 加入参数-replicaof masterip masterport
-    
+
     2. 从节点和主节点建立连接
         
         初始化之后，从节点会尝试和主节点建立TCP连接
-    
+
     3. 从节点和主节点确认连接（握手）
         
         从节点和主节点互相发送PINGPONG确认可以通信，并且从节点会向主节点发送自己的ip，port以及一些对协议的支持情况
-    
+
     4. 从节点判断复制类型并执行
         
         从发送`PSYNC` 获取更新类型（全量/增量）
-    
+
         从根据更新类型，执行具体数据的复制
-    
+
     redis关于从库的信息，一样配置在redisServer这个结构中
-    
+
     ```c
     struct redisServer {
        ...
@@ -2202,9 +2065,9 @@
        ...
     }
     ```
-    
+
     初始化的时候，通过调用`initServerConfig`，将一些状态进行初始化
-    
+
     ```c
     // 初始化的时候默认不是从节点，这些都是默认端口ip
     server.masterhost = NULL;
@@ -2223,13 +2086,13 @@
     // 偏移量
     server.master_repl_offset = 0;
     ```
-    
+
     而后，判定该节点被设置为从节点后，会调用`replicationSetMaster`, 他会设置master的信息，设置成功后把状态前进到CONNECT
-    
+
     ```c
     void replicationSetMaster(char *ip, int port) {
         ...
-    
+
         disconnectAllBlockedClients();
     
         server.masterhost = sdsnew(ip);
@@ -2262,22 +2125,22 @@
         connectWithMaster();
     }
     ```
-    
+
     setMaster主要用来初始化从节点配置，结束后会进入下一状态并调用连接函数进行连接
-    
+
     如果由于其他原因被回滚到这个状态，redis会在serverCron中起一个replacationCron，其中的updateFailoverStatus函数会继续尝试初始化配置
-    
+
     ```c
     void replicationCron() {
        updateFailoverStatus();
        ...
     }
     ```
-    
+
     这个函数主要维护了所有主从状态的转移，每个状态检查是否要进入下一个状态（fail回滚到上个状态保证能继续往下走）
-    
+
     连接状态，主要工作就是建立连接，并进入到connecting状态
-    
+
     ```c
     int connectWithMaster(void) {
         // syncWithMaster是回调函数，建立之后就会调用
@@ -2290,18 +2153,17 @@
             server.repl_transfer_s = NULL;
             return C_ERR;
         }
-
-
-​    
+    
+    
         server.repl_transfer_lastio = server.unixtime;
         server.repl_state = REPL_STATE_CONNECTING;
         serverLog(LL_NOTICE,"MASTER <-> REPLICA sync started");
         return C_OK;
     }
     ```
-    
+
     connectWithMaster正常情况下会在setMaster中调用，同样他也会在cron中检查，保证因为握手失败等原因回退的从节点建立能继续执行
-    
+
     ```c
     void replicationCron() {
        …
@@ -2315,11 +2177,11 @@
         …
     }
     ```
-    
+
     一旦进入connect最后，状态机被置为REPL_STATE_CONNECTING, 他会调用syncWithMaster
-    
+
     这个函数在REPL_STATE_CONNECTING阶段会比较简单，他直接发一个PING给master，并且状态设置为REPL_STATE_RECEIVE_PING_REPLY
-    
+
     ```c
     if (server.repl_state == REPL_STATE_CONNECTING) {
         connSetReadHandler(conn, syncWithMaster);
@@ -2330,15 +2192,15 @@
         return;
     }
     ```
-    
+
     可以看到，当这个连接上有可读事件的时候，他会再次调用sync回来，这个时候状态已经是PING_REPLAY了
-    
+
     那他就会进入REPL_STATE_SEND_HANDSHAKE阶段，给主节点发送握手需要的协议（如果需要AUTH，先发AUTH
-    
+
     ```c
     if (server.repl_state == REPL_STATE_RECEIVE_PING_REPLY) {
         err = receiveSynchronousResponse(conn);
-    
+
         if (err == NULL) goto no_response_error;
         if (err[0] != '+' &&
             strncmp(err,"-NOAUTH",7) != 0 &&
@@ -2357,7 +2219,7 @@
         // 进入握手阶段
         server.repl_state = REPL_STATE_SEND_HANDSHAKE;
     }
-    
+
     if (server.repl_state == REPL_STATE_SEND_HANDSHAKE) {
         // 如果需要认证先发auth
         if (server.masterauth) {
@@ -2375,7 +2237,7 @@
             err = sendCommandArgv(conn, argc, args, lens);
             if (err) goto write_error;
         }
-    
+
         //这里已经AUTH通过了，那么给主库发送自己的端口
         //这个阶段监控主节点就能看REPLCONF请求
         //从节点信息发送完，在主节点上执行INFO指令就能看到从节点了
@@ -2389,33 +2251,33 @@
             sdsfree(portstr);
             if (err) goto write_error;
         }
-    
+
         // 发送自己的ip
         if (server.slave_announce_ip) {
             err = sendCommand(conn,"REPLCONF",
                     "ip-address",server.slave_announce_ip, NULL);
             if (err) goto write_error;
         }
-    
+
         // 对 RDB 文件和无盘复制的支持情况
         err = sendCommand(conn,"REPLCONF",
                 "capa","eof","capa","psync2",NULL);
         if (err) goto write_error;
-    
+
         // 上面相当于是一个完整的逻辑，其实每一步都有自己对应的状态和失败处理，下面都略去了
         server.repl_state = REPL_STATE_RECEIVE_AUTH_REPLY;
         return;
     }
-    
+
     ... 每种子请求的状态处理
     //上面从库信息/支持的协议都同步完后，进入这个状态
     server.repl_state = REPL_STATE_RECEIVE_CAPA_REPLY
     ```
-    
+
     校验完，同步完配置信息，那就要真的开始数据的传输了
     
     同样在这个函数里
-    
+
     ```c
     /* 从库状态机进入REPL_STATE_RECEIVE_CAPA. */
     if (server.repl_state == REPL_STATE_RECEIVE_CAPA) {
@@ -2434,11 +2296,11 @@
               return;
       }
     ```
-    
+
     主从库通过slaveTryPartialResynchronization发送offset给主库
-    
+
     主库返回这次复制是全量还是增量或是错误
-    
+
     ```c
     int slaveTryPartialResynchronization(int fd, int read_reply) {
         …
@@ -2477,34 +2339,34 @@
         return PSYNC_NOT_SUPPORTED;
     }
     ```
-    
+
     可以看到redis的主从复制，从节点基于状态机实现了11种（宏定义最高到11）状态的切换机制
-    
+
     这种机制可以应对某一步网络等原因出错的情况
-    
+
     然后通过offset实现了全量/增量复制的判断
-    
+
     主库则不需要状态机，他只是回应从库的请求。
 
 
     redis-sentinel
     ====
-    
+
     redis哨兵机制是redis可靠性的第二个保障
-    
+
     redis哨兵是比较特殊的redis server，一个redis实例启动后会确定他的身份是否是哨兵，在shutdown之前是不可以变化的
-    
+
     sentinel-init
     ====
-    
+
     有两种方式去启动一个哨兵实例
-    
+
     1. redis-sentinel xxx.conf
-    
+
     2. redis-server xxx.conf –-sentinel
-    
+
     redis启动的时候，在initServerConfig 之前，会调用 checkForSentinelMode 函数，来确定当前实例是不是哨兵
-    
+
     ```c
     int checkForSentinelMode(int argc, char **argv) {
         int j
@@ -2516,13 +2378,13 @@
         return 0;
     }
     ```
-    
+
     这样他就通过这个函数，给全局变量`sentinel_mode` 设置一个值 `server.sentinel_mode = checkForSentinelMode(argc,argv);`
-    
+
     先走通用的redis server启动函数，因为哨兵其实也是一个server，在这个initServerConfig里面有个比较重要的函数`populateCommandTable`
-    
+
     他会把哨兵的部分命令替换为哨兵自己的实现
-    
+
     ```c
     void populateCommandTable(void) {
         int j;
@@ -2543,11 +2405,11 @@
         }
     }
     ```
-    
+
     他这里把命令给换成这个`{"sentinel","A container for Sentinel commands","Depends on subcommand.","2.8.4",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SENTINEL,SENTINEL_History,SENTINEL_tips,NULL,-2,CMD_ADMIN|CMD_SENTINEL|CMD_ONLY_SENTINEL,0,.subcommands=SENTINEL_Subcommands},`
-    
+
     具体有哪些可以在哨兵输入help查看支持的命令
-    
+
     ```c
     // 检查当前quorum的值
     "CKQUORUM <master-name>",
@@ -2600,20 +2462,20 @@
     "SIMULATE-FAILURE [CRASH-AFTER-ELECTION] [CRASH-AFTER-PROMOTION] [HELP]",
     "    Simulate a Sentinel crash.",
     ```
-    
+
     而后sentinel模式的节点会走自己的初始化配置和初始化函数
-    
+
     ```c
     if (server.sentinel_mode) {
        initSentinelConfig();
        initSentinel();
     }
     ```
-    
+
     初始化配置的比较简单，他只是去改变redis的哨兵端口（改为宏定义的26379）
     
     并且取消保护模式，相当于哨兵一定是暴露给不同host的
-    
+
     ```c
     void initSentinelConfig(void) {
         server.port = REDIS_SENTINEL_PORT;
@@ -2622,11 +2484,11 @@
     ```
     
     initSentinel 则是初始化了哨兵用到的一些全局变量或者数据结构,这其中包括了哨兵实例的 ID、用于故障切换的当前纪元、监听的主节点、正在执行的脚本数量，以及与其他哨兵实例发送的 IP 和端口号等信息
-    
+
     到这里准备工作就完成了，main中会调用sentinelIsRunning 函数，这个时候哨兵实例就成功启动了
-    
+
     这个函数其实是给哨兵生成一个id（如果没有）,再调用 sentinelGenerateInitialMonitorEvents 函数（在 sentinel.c 文件中），给每个被监听的主节点发送事件信息
-    
+
     ```c
     void sentinelGenerateInitialMonitorEvents(void) {
         dictIterator *di;
@@ -2642,9 +2504,9 @@
     ```
     
     可以看到他给所有主节点的+monitor频道发了一个"%@ quorum %d",ri->quorum
-    
+
     相当于通知主节点和其他监控了主节点的哨兵节点，当前节点开始监听该主节点
-    
+
     他怎么知道主节点是谁的，就和哨兵的一个结构有关
     ```c
     typedef struct sentinelRedisInstance {
@@ -2662,7 +2524,7 @@
         ...
     }
     ```
-    
+
     哨兵模式下，每个实例对应了一个这样的结构，里面表明了自己的类型，如果是哨兵，还会有监控的主节点和主节点的从节点信息
 
 
@@ -2672,10 +2534,9 @@
 
 
     **************
-
-
-​    
-​    
+    
+    
+    
     性能优化
     ====
     
@@ -2686,4 +2547,4 @@
     做后端开始，我最先接触的问题是redis内存优化，当时后端一个业务redis要9G左右，单个实例内存占用过大，会给维护（AOF重写）等功能带来很多困扰，如果他超过上限，触发了swap或者内存淘汰机制，就更麻烦了。当时采用了离线工具[rdr-darwin](https://github.com/xueqiu/rdr) 把线上一个9G的redis实例 bgsave拿到我的mac上来进行内存分析，给一些冗余的数据增加过期逻辑或者执行脚本删除后，成功把每个实例内存控制在了5G以内。当时我非常开心，决定持续关注项目后端的性能。
     
     写这段话的时候已经做了半年后端，这段时间，我经常靠日志和火焰图工具来发现、定位一些后端的潜在问题，优化需要靠数据支撑，也需要靠技术支撑。目前的方法论一部分在工作内项目主程和其他很厉害的同事给我的指导和灵感，另一部分在于反复研究OpenResty作者的大作[动态追踪技术漫谈](https://blog.openresty.com.cn/cn/dynamic-tracing/)。有时候发现了问题可以独立完成优化，这让我能感觉到我的日常工作不止是每周一天两天就能完成的Jira单子，而是切实的对自己的提升。有时候不能独立完成优化（这在前面尤为常见，我大学的基础课程学的非常差，一度觉得自己在给项目丢人），那就要请教别人之后完成优化或者和别人一起完成优化，无论是哪一种，我都要仔细查阅文档，并仔细对比优化后的效果。成功的优化让我感到快乐，希望有一天我也能成为非常厉害的人。
-
+    
