@@ -21,6 +21,7 @@
         - [cache](#cache)
         - [ngx_timer](#ngx_timer)
         - [lua-resty-mysql](#lua-resty-mysql)
+        - [lua-resty-redis](#lua-resty-redis)
     
     - [压力测试和火焰图](#压力测试和火焰图)
         - [wrk](#wrk)
@@ -494,6 +495,55 @@
     ```
     没错，我直接把resty.mysql的query接口改了，并且send_query直接定义等于query，因为我还是想复用连接，既然send也要读完，我干脆直接query就好了
     还顺手封装了一下query的 error="again"这种情况
+    
+    lua-resty-redis
+    ====
+    
+    这个是Openresty官方的redis库，简单使用也得建立连接，执行命令，扔回池子或者关闭连接
+    
+    项目封装了一层，new=new+connect, do_command = connect + do_cmd + (keepalive or print error)，毕竟重度依赖redis，不可能每次调用都自己处理连接，要么每个端口一个实例保存在ngx.ctx中，请求结束统一keepalive，要么像这样写，每次请求建立连接并keepalive，都是没什么问题的设计。
+    
+    但错误处理处理的不是很理想，有天早上我看线上的脚本，跑到一个玩家就开始报错，开始报错也就算了，报错之后的玩家一个都没跑成功（或者说大部分都失败了）。原因很ZZ，我们脚本检查玩家有没有一个道具，没有才给他发，处理的同事写的不太好，道具id 0（完全新增），也去背包里判断有没有。背包里也不太鲁棒，道具类如果道具id<=0就不会继续构建，相当于只走了父类的构造，自己是没有db_key的，这就导致本来道具数量是tonumber(redis:hget(item.db_key. 'item_num')) or 0，成了调用redis:hget(nil)，resty-redis这个人还真给redis发....导致这个连接是错误请求，而处理错误的代码像这样：
+    ```lua
+    local rd, err = resty.redis:connect ...
+    if err then
+        print("......")
+        // (1)
+        return
+    end
+    local res, err = rd:do_cmd(xxx, xxx)
+    if not res or err then
+        print("......")
+        // (2)
+        return
+    end
+    rd:set_keepalive(...)
+    return res, err
+    ```
+    也就是失败的连接他没管，最后肯定就是喜闻乐见连接池炸了（后面玩家以前没有这个种类道具的情况很多，有特别多hget nil的失败连接走了创建->报错->躺平）
+    可以说这一条链上有一个哥们处理的正常点，这个问题都不会发生。
+    
+    还好不用我修，但我也把这个接口重新封装了一下
+    
+    注意看，(1)的时候并没有建立连接，不用管。
+    主要是(2)的时候，只要连接没超时其实都还能复用（激进派），就算你觉得他不能用了好歹给他close(保守派)
+    
+    这次当了个激进派
+    ```lua
+    -- if not res的时候调用
+    local function handle_error(self, redis, res)
+        //print一些报错
+        if res == nil then
+            redis:close()
+            return
+        end
+        //注意看源码，返回值是nil的时候都是超时这种不可挽救的错误，false则还可以救一下。当然这两种情况if not res都是true,都能走进我们的处理函数
+        self:set_keepalivemod(redis)
+    end
+    ```
+    
+    pipeline那边也类似处理一下，大功告成
+    
     
     LuaGC
     ====
