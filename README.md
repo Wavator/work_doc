@@ -57,6 +57,9 @@
       - [sentinel-init](#sentinel-init)
       - [redis-sentinel-vote](#redis-sentinel-vote)
   - [性能优化](#%E6%80%A7%E8%83%BD%E4%BC%98%E5%8C%96)
+    - [redis](#redis-1)
+      - [内存占用高](#%E5%86%85%E5%AD%98%E5%8D%A0%E7%94%A8%E9%AB%98)
+      - [内存突增](#%E5%86%85%E5%AD%98%E7%AA%81%E5%A2%9E)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 [toc]
