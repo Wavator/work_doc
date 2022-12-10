@@ -17,17 +17,17 @@
 
 
 
-    ## OpenResty
+## OpenResty
 
     
     这周比较系统的学习了一下OpenResty（当然说掌握还差很多，但也收获不小），看看平时开发/测试的时候还是有一些坑，要进行规避
     
-    ### luajit(OpenResty 2.1)
+### luajit(OpenResty 2.1)
     
     LuaJit ~= Lua5.1，用的时候还是要仔细选择高性能接口。Jit的原理基础的都懂，高深的暂时没有研究的想法。
     
     
-    #### test
+#### test
     
     OpenResty的Lua是LuaJit2.1，测试的时候有点不一样，根据其作者的建议，如果我们要测试一段代码(比如这个func)，那他应该要长这样：
     ```lua
@@ -49,7 +49,7 @@
     ```
     下面第一个模块table的时候会比对一下不循环很多次的时候和循环很多次的时候的区别
     
-    #### table
+#### table
 
     
     新操作还是不多的，concat之类的操作项目里会经常用。以前知道table.new，但一直用的比较少，这次来实际对比一下有什么区别
@@ -79,7 +79,7 @@
     table.clear和table池估计实际用不到，不测了，等table new成为性能瓶颈可以回来看看
     
     
-    #### string
+#### string
 
     
     - 字符串拼接
@@ -123,7 +123,7 @@
         说明string.sub是可以用的操作，OpenResty最佳实践的作者可能版本老一些，或者我测试的姿势不对.
         
     
-    #### os
+#### os
 
     
     Lua的os，io库都是同步阻塞操作，而OpenResty的理念是同步非阻塞，他有一套自己的shell工具`resty.shell`，用于执行shell语句，大概长这样：
@@ -156,18 +156,18 @@
     let g:syntastic_lua_luacheck_args = "--no-unused-args --std luajit --globals ngx"
     ```
     
-    ### openresty-lua
+### openresty-lua
 
     
     这个模块用于对openresty lua的查漏补缺。
     
-    #### openresty-basic
+#### openresty-basic
     
     OpenResty个人感觉下来对后端开发最大的便利就是同步非阻塞，不然后端读个redis实现起来可能相当复杂，后端每个redis操作相当于都是传命令+回调，先coroutine 装一下redis操作，里面luasocket连一下redis，协程阻塞读，读完返回resume执行回调。这样就太麻烦了，而且相当于没有好好利用nginx的事件循环机制去做这些事情。
 
     OpenResty在这一块已经完全做好了，在有网络IO的情况下他会自动把当前的lua runtime挂起来，然后把网络IO的回调注册到Nginx的事件循环里面，这个时候worker的CPU就可以去处理别的请求了。网络IO返回之后，这个lua runtime又会被唤醒（基于Nginx，其实是等待worker调度，这里也可以看出大量非网络IO的操作会影响其他协议的处理速度，两个都接到一个worker，都走到content_by_lua，一个开始大量运算，另一个就会被长时间挂起，引发更多问题）。这里还要说一下同步非阻塞说的必须是OpenResty提供的模块，nginx-xxx-module或者lus-resty-xxxx才是同步非阻塞的，因为只有用人家的接口人家才自动帮你做挂起，注册，唤醒这一系列操作。所以自己写的网络IO等操作（比如自己写了个模块调用luasocket请求），lua自带的函数（os.xxx, io.xxx），均不能被OpenResty调度，都是同步阻塞的，开发中要尽量减少使用，如果有大量的类似CPU运算，文件读取的操作，考虑扔给其他服务做。
     
-    #### cosocket
+#### cosocket
 
     
     这个模块是现在OpenResty比较推荐使用的网络模块，lua-resty-*的大部分网络库比如redis mysql dns等都是基于这个实现的，也就是[ngx.socket.tcp](https://github.com/openresty/lua-nginx-module#tcpsockconnect)（其实也有[udp](https://github.com/openresty/lua-nginx-module#ngxsocketudp)版本），他可以看作lua-socket的非阻塞版。大部分生命周期都是可以使用的。
@@ -176,7 +176,7 @@
 
     仔细阅读这个的文档之后可以回答我上个月遇到的很多问题，比如connect的时候调用的是nginx配置的resolver，连接建立之后需要手动sslhandshake等。当然最重要的还是遇到问题知道来哪里查，以及网络基础要打好，这个也是后面学习的重点。
     
-    #### lua-resty-core
+#### lua-resty-core
     
     这个是OpenResty在某个版本后默认开启的模块，原理是改用了[luajit ffi](http://luajit.org/ext_ffi_api.html)去进行实现，而不是lua c function，这两者最主要的区别是lua ffi可以被Jit追踪优化，但是lua c function不行
 
@@ -186,7 +186,7 @@
     
     然后去项目里看看，发现OpenResty的版本比较低，实际上也没在init阶段require，相当于我们项目还是lua-nginx-module 的实现，这个如果底层的ngx.xxx成为性能瓶颈，可以成为一个优化的点
     
-    #### cache
+#### cache
     
     项目里用cache的地方不多，主要原因是大部分数据其实在redis里，mysql里面都是一些战报之类的数据，战报数据比较冷。
     
@@ -208,9 +208,9 @@
     
     
     
-    ### 压力测试和火焰图
+### 压力测试和火焰图
     
-    #### wrk
+#### wrk
     
     wrk是一款比较好用的压力测试工具，他相比较ab而言的最大优点是可以很轻松的多线程压测，单命令可以比较容易的产生跑满OpenResty的所有worker的压力（可以自定义压测线程数），并且可以自定义Lua脚本（也就是支持用Lua去模拟真实的请求）
     
@@ -286,7 +286,7 @@
 
     我一般找到性能瓶颈之后，优化具体的接口我都是用[test](#test) 模块的办法自己写个command脚本，判断一下是否优化成功。wrk可以当成一个工具技能，先留着，相信早晚一天有用
     
-    #### 火焰图
+#### 火焰图
     
     这个目前项目里有on-cpu的火焰图，一般是看那个。具体的图不方便放，上个月的文档里介绍了[openresty-systemtap](https://github.com/Wavator/openresty-systemtap-toolkit)这个东西，使用它定位了一个worker 100%跑满CPU的问题，但是实际应用中，这种死循环的情况并不多见，更多的时候是玩家感觉卡顿，要分析代码性能。
     
@@ -305,13 +305,13 @@
     #scp或者ftp之类的把这个a.svg换个名字发出去，放到网页上大家就都能看了
     ```
     
-    ### ngx_timer
+### ngx_timer
     
     ngx_timer是用来定时启动一个子任务的方法，业务逻辑一般用他做一些批量提交或者异步处理的行为
     
     这个东西本身用起来很简单，就ngx.timer.at(t, func)就行，但是真的到了线上，还是会遇到一些问题，这里总结一下
     
-    #### 数量超过限制
+#### 数量超过限制
     	线上我们的lua server，lua_max_pending_timers和lua_max_running_timers 在nginx.conf里当然配置的比较大(8192,4096),但是还有一种情况，在定时器脚本中，timer的数量并不受nginx.conf控制，还是默认的256，也就导致我们跑结算脚本的时候触发了"worker connections not enough"的bug，丢失了一部分数据。我借鉴其他人的做法重新封装了脚本里的timer，并把项目里的所有ngx.timer替换为封装的timer
     	```lua
     	local timer = ngx.timer
@@ -341,11 +341,11 @@
     	
     	就是脚本的情况下使用ngx.timer.pending_count() + ngx.timer.running_count() 获取当前运行的timer数量，如果超过128，则直接执行回调。
     
-    #### 上下文问题
+#### 上下文问题
     	timer的ngx.ctx并不继承原本的请求，结束的时候也不会走到我们一个请求固定的逻辑（比如keepalive, 推送给玩家信息，记录日志等）
     	所以把上面接口又封装了一层，涉及比较多业务代码，这边就先略去了，原理就是把ngx ctx clone一份，然后二次封装一下timer，让他真正的像一个请求
  
-    ### lua-resty-mysql
+### lua-resty-mysql
 
     项目里，是直接new一个resty.mysql实例，作为请求级别的mysql使用，主要调用query/send_query接口，请求结束还会调用keepalive放入连接池
     
@@ -479,11 +479,11 @@
     pipeline那边也类似处理一下，大功告成
     
     
-    ## LuaGC
+## LuaGC
 
     最近开了个坑，起因是因为我在自以为已经对Lua比较了解的情况下，看了一篇关于Lua GC的介绍 [Lua GC算法并行化探讨](https://zhuanlan.zhihu.com/p/564165613), 看完觉得我对力量一无所知，决定开始整理一下Lua GC的原始算法，改进后的三色GC（包括如何实现增量GC，这个是以前没有认真看过的），以及文章中提到的并行化思路。
     
-    ### 双色标记
+### 双色标记
     
     先来看一下双色标记，这个算法适用于Lua 5.1之前，项目里已经没有这么古老版本的Lua了，这个整体逻辑也比较简单，就是比较朴素的标记-清除算法
     
@@ -498,7 +498,7 @@
     
     所以这种做法必须是同步阻塞地执行，也就是传说中的STW（stop the world）回收，这个时候主线程在GC结束之前就不能继续干别的事情了，从用户侧看起来就是游戏卡了。
 
-    ### 三色标记
+### 三色标记
     
     双色这么不聪明，肯定要改，目前的Lua用的都是三色GC法，这个和Go之类的语言一样的，整体比较复杂
     
@@ -569,19 +569,17 @@
     ```
     
     
-
-    
-    ## redis
+## redis
     
     这个文档写的时候我的redis已经使用了半年，我们后端大部分逻辑是基于redis操作的，所以对一些基础命令已经十分熟悉了，对底层实现也有了解，知道什么情况下选用什么数据结构。这边不再记录这种比较基础的东西，当然如果有薄弱的模块，依然会在对应模块下面补充底层原理的研究。
     
     redis的学习基于两本书和一节课，《Redis开发与运维》，《Redis设计与实现》，第一本我拿来当作工具书，一些场景里的命令和基本原理，都是看这本书学习的，第二本书是我看源码分析的书，写doc的时候还在慢慢看这本书。这两本书都比较不错，但是redis版本有些老，后面极客时间上也学习了蒋德钧老师的《Redis核心技术与实战》，这门课的课程本身和评论区让我大受启发，本来doc里不准备写redis的，但学了这门课之后深感Redis的学习还是太浅。准备把课程中和评论区的一些实战经验，设计经验加以整理。
     
-    ### redis-data-structure
+### redis-data-structure
     
     redis的基础数据结构
     
-    #### redis-string
+#### redis-string
     
     string应该是redis里面比较简单的结构，只有SDS一种实现，编码上注意int，embstr，raw就行
     1. int不是无上限的，超出再incr会抛出异常，所以这个指令或者说redis里面所有xxxincr，xxxincrby都要注意这一点。当然出问题一般内网就直接看到了。另外redis的整数类型也有池子，但是内存淘汰策略开启了LRU之类的策略之后这个就没用了，因为指到常量对象上不好统计引用。
@@ -589,7 +587,7 @@
     3. raw就是最一般的那种redis-str，没有什么优化，申请内存就是倍增到MB之后每次增加1MB，当然我们线上也没这么大的KEY。
     4. redis里面的字符串，维护了长度（保证二进制安全，避免strlen等优点），维护了编码（都要维护），所以一个string object本身就是有一个基础大小在这里的，如果短string特别多，就会严重浪费内存。这种情况可以考虑通过一些id的映射，让这些短string存在hashset之类的结构里（当然hashset的encoding要ziplist，比如线上hash zip entries设置512，那id/500之后500落到一个hashkey里，这500个小str就共享一个ziplist了）。
     
-    ##### redis-string-code
+##### redis-string-code
     
     1. 编译优化
     ```c
@@ -733,7 +731,7 @@
     
     string的部分先整理到这里
     
-    #### redis-hashtable
+#### redis-hashtable
     
     1. 4.0以后的hash算法是siphash
     2. hash的元素个数太多的时候会检查是否需要扩容,总是拓展成2^x
@@ -742,7 +740,7 @@
     5. rehash判断的时候，如果能找到AOF重写或者RDB生成之类的子进程，哈希因子就会变成5，也就是严重冲突的时候依然会rehash
     6. 很多上层数据结构，和redis本身的kvdb，过期键之类的都是hash的实现，hash是最基本的数据结构之一
     
-    ##### redis-hashtable-code
+##### redis-hashtable-code
     
     1. hash算法的选择
         redis 当前版本是siphash，但是算法细节没有过多了解。
@@ -929,7 +927,7 @@
     }
     ```
     
-    #### ziplist
+#### ziplist
 
     redis 部分底层结构是用ziplist来节约空间的，hash元素较少，zset元素较少的时候，均会使用ziplist的底层结构，ziplist底层上是一整块连续的内存。每个元素都会保存上一个元素的大小（并且采用尽量短的数据类型保存），当前项的编码，以及当前项的具体数据，也就是
     ```c
@@ -994,7 +992,7 @@
     
     针对这些问题，redis对ziplist提出了两种优化，quicklist和listpack，分别应用于list和stream等结构
 
-    #### quicklist
+#### quicklist
 
     quicklist简单来说就是一堆ziplist连起来 z1<->z2<->z3<->...<->zn
     他设计出来主要是解决ziplist访问效率问题
@@ -1074,12 +1072,12 @@
 
 
     
-    ##### listpack
+##### listpack
 
     stream项目里基本没用，这个结构就没怎么仔细看了
     
     
-    ##### skiplist
+##### skiplist
 
     
     skiplist是用来实现有序集合的结构
@@ -1144,7 +1142,7 @@
     }
     ```
 
-    ### redis-multi-thread
+### redis-multi-thread
 
     
     redis经常被说是单线程模型，但其实这个说法并不正确。通过阅读redis的源码发现，redis其实只是在“处理客户端请求”这一块是单线程的。
@@ -1156,7 +1154,7 @@
 
     前台来看，redis 在6.0之后（可惜我们项目并没有使用），从单Reactor单线程模式变成了单Reactor多线程模式，用来维护客户端的socket连接。
 
-    #### redis-bio
+#### redis-bio
 
     后台任务都是通过bio.c建立的，主要是通过`bioSubmitJob` 进行创建，通过`bioProcessBackgroundJobs` 进行消费
 
@@ -1269,7 +1267,7 @@
 
     redis后台任务线程用了大量的锁操作，对这块并不熟悉，看起来有点吃力。但是忽略锁的操作，就是比较简单的工作模式了。
 
-    #### redis-reactor
+#### redis-reactor
     
     redis的reactor模式在6.0版本前后有所不同，我们项目是redis是5.x的版本，所以用不上6.0以后的io特性
 
@@ -1430,7 +1428,7 @@
 
     整个流程大概是这样的，就是调用多路复用api，获取就绪的文件事件，执行，再处理TimeEvents。下面分别介绍一下两种事件的定义，注册，执行
 
-    ##### IO事件
+##### IO事件
 
     创建: 主要是在事件循环和多路复用api中分别注册，并绑定对应的回调函数和数据
 
@@ -1545,7 +1543,7 @@
     `processUnblockedClients`, 这个最终会调用`processCommand`拿出缓冲区的指令并处理
 
 
-    ##### 时间事件
+##### 时间事件
 
     这个内容少一些，类比上面，initServer的时候他一样注册了
     `aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL)`
@@ -1567,18 +1565,18 @@
 
     所以删除key(对应databasecron里面的activeExpireCycle)等操作是可能阻塞主线程的操作
 
-    ### redis-persist-datas
+### redis-persist-datas
 
 
     redis 有rdb和aof两种方式持久化数据，rdb是类似于生成快照的方式，aof则是基于指令
 
     目前项目里是aof的方式，策略是everysec，每天11点重写aof
 
-    #### redis-rdb
+#### redis-rdb
 
-    #### redis-aof
+#### redis-aof
 
-    ##### aof写入
+##### aof写入
 
     aof 如果开启，流程就分为三步，首先看processCommand最终调用到的call函数
     ```c
@@ -1654,7 +1652,7 @@
 
     注意aof是先操作，再写aof，这个应该是为了避免用aof恢复数据或重写的时候拿出错误的指令
 
-    ##### aof 重写
+##### aof 重写
 
     aof一条条的插入，就会太大，所以需要定时重写，比如
     sadd lunlun gay
@@ -1910,7 +1908,7 @@
 
     子进程aof重写完之后，会给父进程发送`write(server.aof_pipe_write_ack_to_parent,"!",1)`，让父进程停止重写。
 
-    ##### 7.0之后
+##### 7.0之后
 
     在serverCron里轮询，每次调用checkChildrenDone，里面调用waitpid，判断子进程是否完成，完成了调用backgroundRewriteDoneHandler更新manifest和进行其他清理工作。
 
@@ -1998,7 +1996,7 @@
 
     到这里相互确认完，老版本的aof重写就完全完成了
 
-    ##### 7.0 之后的manifest管理（Multi Part AOF）
+##### 7.0 之后的manifest管理（Multi Part AOF）
 
     主要是有三种AOF版本，base，incr，history
 
@@ -2118,10 +2116,10 @@
 
         - 节约CPU资源，老版本相当于写两份，他写一份。不用往管道里写入，也节约了一些磁盘IO
 
-    ### redis-replica
+### redis-replica
 
     redis主从复制有四个阶段：
-    #### 从节点server初始化
+#### 从节点server初始化
         
         从节点在被设置为从节点的时候，会触发初始化操作。具体有下面几种：
         
@@ -2131,11 +2129,11 @@
 
         - redis-server 加入参数-replicaof masterip masterport
 
-    #### 从节点和主节点建立连接
+#### 从节点和主节点建立连接
         
         初始化之后，从节点会尝试和主节点建立TCP连接
 
-    #### 从节点和主节点确认连接（握手）
+#### 从节点和主节点确认连接（握手）
         
         从节点和主节点互相发送PINGPONG确认可以通信，并且从节点会向主节点发送自己的ip，port以及一些对协议的支持情况
 
@@ -2445,13 +2443,13 @@
     主库则不需要状态机，他只是回应从库的请求。
 
 
-    ### redis-sentinel
+### redis-sentinel
 
     redis哨兵机制是redis可靠性的第二个保障
 
     redis哨兵是比较特殊的redis server，一个redis实例启动后会确定他的身份是否是哨兵，在shutdown之前是不可以变化的
 
-    #### sentinel-init
+#### sentinel-init
 
     有两种方式去启动一个哨兵实例
 
@@ -2622,7 +2620,7 @@
     哨兵模式下，每个实例对应了一个这样的结构，里面表明了自己的类型，如果是哨兵，还会有监控的主节点和主节点的从节点信息
 
 
-    #### redis-sentinel-vote
+#### redis-sentinel-vote
 
 
 
@@ -2630,7 +2628,7 @@
     
     
     
-    ## 性能优化
+## 性能优化
     
     这一定会是长久的课题。我要对项目后端维护持续关注，并经常给自己打气。
     
