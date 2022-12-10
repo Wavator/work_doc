@@ -56,10 +56,13 @@
     - [redis-sentinel](#redis-sentinel)
       - [sentinel-init](#sentinel-init)
       - [redis-sentinel-vote](#redis-sentinel-vote)
-  - [性能优化](#%E6%80%A7%E8%83%BD%E4%BC%98%E5%8C%96)
+  - [优化](#%E4%BC%98%E5%8C%96)
     - [redis](#redis-1)
       - [内存占用高](#%E5%86%85%E5%AD%98%E5%8D%A0%E7%94%A8%E9%AB%98)
       - [内存突增](#%E5%86%85%E5%AD%98%E7%AA%81%E5%A2%9E)
+    - [前端工具](#%E5%89%8D%E7%AB%AF%E5%B7%A5%E5%85%B7)
+      - [打包脚本优化](#%E6%89%93%E5%8C%85%E8%84%9A%E6%9C%AC%E4%BC%98%E5%8C%96)
+      - [远程调试](#%E8%BF%9C%E7%A8%8B%E8%B0%83%E8%AF%95)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 [toc]
